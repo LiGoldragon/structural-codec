@@ -27,11 +27,16 @@
 //! - Mirror: [`value::StructuralValue`] — the Core-agnostic generic currency.
 //! - Conformance: [`conformance`] — the law-5 harness the generated codec will meet.
 //! - Fixtures: [`fixture`] — the proof-of-concept universe and the acceptance gate.
+//! - The Protos pairing: [`encoded_form`] — the TRUTH side ([`EncodedForm`] marker plus
+//!   the typed [`EncodedConversion`] layer conversion `EncodedForm<T> -> EncodedForm<X>`,
+//!   text-free) — beside [`textual_form`] — the VIEW side ([`Textual`] producing a
+//!   first-class [`TextualForm<T>`] value through the two organs).
 
 pub mod authoring;
 pub mod codec;
 pub mod conformance;
 pub mod disjoint;
+pub mod encoded_form;
 pub mod error;
 pub mod evaluator;
 pub mod fixture;
@@ -44,6 +49,7 @@ pub mod writer;
 
 pub use codec::{ConstructorCodec, StructuralEntry};
 pub use conformance::{ConformanceError, ConformanceHarness, GeneratedCodec};
+pub use encoded_form::{Converted, EncodedConversion, EncodedForm};
 pub use error::{DecodeError, DisjointnessError, EncodeError, TableError};
 pub use evaluator::StructuralEvaluator;
 pub use form::{
@@ -58,6 +64,6 @@ pub use table::{
     AddressedStructuralTable, CoreLayoutIdentity, LeafCodecContractId, RawProfileIdentity,
     StructuralTableDomain, TableIdentityPayload,
 };
-pub use textual_form::TextualForm;
+pub use textual_form::{ChunkName, TextChunk, Textual, TextualForm};
 pub use value::{ScalarValue, StructuralValue, StructuralValueDomain};
 pub use writer::CanonicalText;

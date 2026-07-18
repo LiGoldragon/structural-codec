@@ -73,3 +73,14 @@ pub enum TableError {
     #[error(transparent)]
     Archive(#[from] ArchiveError),
 }
+
+/// A [`TextualForm`](crate::TextualForm) value did not carry the single text chunk the
+/// provided un-view path requires. The trivial single-document case is one chunk; the
+/// multi-chunk (filename→text) index is a deferred packaging future, so an un-view of a
+/// zero- or many-chunk view is a loud, typed error rather than a silent pick.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("the textual form carried {count} chunks; un-view requires exactly one")]
+pub struct SingleChunkRequired {
+    /// How many chunks the view actually carried.
+    pub count: usize,
+}
