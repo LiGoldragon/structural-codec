@@ -38,6 +38,7 @@ pub mod fixture;
 pub mod form;
 pub mod ids;
 pub mod table;
+pub mod textual_form;
 pub mod value;
 pub mod writer;
 
@@ -57,5 +58,6 @@ pub use table::{
     AddressedStructuralTable, CoreLayoutIdentity, LeafCodecContractId, RawProfileIdentity,
     StructuralTableDomain, TableIdentityPayload,
 };
+pub use textual_form::TextualForm;
 pub use value::{ScalarValue, StructuralValue, StructuralValueDomain};
 pub use writer::CanonicalText;
