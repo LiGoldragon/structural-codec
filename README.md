@@ -1,3 +1,8 @@
+> **DEPRECATED.** This crate is consolidated into
+> [LiGoldragon/protos](https://github.com/LiGoldragon/protos) as a member of the
+> protos cargo workspace. Every consumer now pins protos. This repository is kept
+> only for history; do not add new pins to it.
+
 # structural-codec
 
 The Core-associated, bidirectional, revisioned **structural-form kernel** of the
