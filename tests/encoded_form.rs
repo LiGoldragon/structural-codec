@@ -1,17 +1,12 @@
-//! Kernel-level evidence for the TRUTH side of the Protos pairing: the
-//! [`EncodedForm`] marker, the typed [`EncodedConversion`] layer conversion
-//! (`EncodedForm<T> -> EncodedForm<X>`, text-free), and the first-class
-//! [`TextualForm<T>`] view value the [`Textual`](structural_codec::Textual) produces.
+//! Kernel evidence for the EncodedForm/TextualForm pairing.
 //!
-//! These stand the seated surface up in isolation with toy encoded forms, so a real
-//! instance (schema→logos through the Nomos macros, in `core-nomos`) inherits a proven
-//! contract. The load-bearing proof is structural: the conversion signature carries no
-//! `&str` / `String`, so a conversion is a real type conversion with no text on the path.
+//! The typed conversion layer is text-free: source identifiers are retained as
+//! identifiers and the target NameTable composes the source slice rather than
+//! resolving and re-interning its names.
 
-use name_table::{Name, NameTable};
+use name_table::{IdentifierNamespace, Name, NameTable};
 use structural_codec::{Converted, EncodedConversion, EncodedForm, TextualForm};
 
-/// A toy source encoded form: a stringless value carrying only an interned identifier.
 struct SourceLanguage;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceForm {
@@ -21,70 +16,56 @@ impl EncodedForm for SourceForm {
     type Language = SourceLanguage;
 }
 
-/// A toy target encoded form: the same identifier, plus a target-only appended name.
 struct TargetLanguage;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TargetForm {
     original: name_table::Identifier,
-    appended: name_table::Identifier,
 }
 impl EncodedForm for TargetForm {
     type Language = TargetLanguage;
 }
 
-/// A toy layer conversion: it preserves the source identifier and appends one
-/// target-only name into the continuous nametree — the shape the real schema→logos
-/// lowering has, with no text anywhere on the path.
-struct AppendConversion {
-    appended: &'static str,
-}
+/// A toy schema-to-Logos conversion. Its body touches neither `str` nor `String`:
+/// the source identifier stays intact while the target NameTable borrows the
+/// schema slice and owns an empty Logos slice for future boundary allocation.
+struct ComposeConversion;
 
-impl EncodedConversion for AppendConversion {
+impl EncodedConversion for ComposeConversion {
     type Source = SourceForm;
     type Target = TargetForm;
-    type Error = std::convert::Infallible;
+    type Error = name_table::NameTableError;
 
     fn convert(
         &self,
         source: &SourceForm,
         names: &NameTable,
     ) -> Result<Converted<TargetForm>, Self::Error> {
-        let mut extended = NameTable::extend_from(names);
-        let appended = extended.intern(Name::new(self.appended));
+        let names = NameTable::new(IdentifierNamespace::Logos).compose(names)?;
         Ok(Converted {
             target: TargetForm {
                 original: source.name,
-                appended,
             },
-            names: extended,
+            names,
         })
     }
 }
 
 #[test]
-fn typed_conversion_threads_the_continuous_nametree_without_text() {
-    let mut names = NameTable::new();
-    let source_name = names.intern(Name::new("Source"));
+fn typed_conversion_borrows_source_names_without_text_or_copying() {
+    let mut names = NameTable::new(IdentifierNamespace::Schema);
+    let source_name = names
+        .intern(Name::new("Source"))
+        .expect("schema allocation");
     let source = SourceForm { name: source_name };
 
-    let conversion = AppendConversion { appended: "Target" };
-    let converted = conversion.convert(&source, &names).expect("convert");
+    let converted = ComposeConversion.convert(&source, &names).expect("convert");
 
-    // The source index is preserved in the extended, continuous table.
     assert_eq!(converted.target.original, source_name);
     assert_eq!(
         converted.names.resolve(source_name).unwrap().as_str(),
         "Source"
     );
-    // The target-only name is resolvable only in the extended table.
-    assert_eq!(
-        converted
-            .names
-            .resolve(converted.target.appended)
-            .unwrap()
-            .as_str(),
-        "Target"
-    );
+    assert_eq!(converted.names.len(), 0, "the Logos home starts empty");
 }
 
 #[test]

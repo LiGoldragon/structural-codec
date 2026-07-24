@@ -2,24 +2,23 @@
 //! future generated codec (arriving with `nota-derive` in a later slice). The
 //! `GeneratedCodec` trait is the shape the generated side will implement; the
 //! `ConformanceHarness` exercises it against the evaluator and asserts agreement on
-//! the Core value, the NameTable delta, the canonical output, and the typed-error
+//! the encoded value, the NameTable delta, the canonical output, and the typed-error
 //! decision. TODAY the evaluator is the sole implementation — this trait has no
 //! generated implementor yet, so the harness is compiled-but-dormant scaffolding.
 
-use name_table::{NameResolver, NameTable, NameTableError};
+use name_table::{IdentifierNamespace, NameResolver, NameTable, NameTableError};
 use raw_discovery::Block;
 
 use crate::error::{DecodeError, EncodeError};
 use crate::evaluator::StructuralEvaluator;
-use crate::ids::ScopedCoreTypeId;
+use crate::ids::ScopedEncodedTypeId;
 use crate::table::AddressedStructuralTable;
 use crate::value::StructuralValue;
-use crate::writer::CanonicalText;
 
 /// The contract a generated codec implements so it can be proven equivalent to the
 /// evaluator over the same fixtures.
 pub trait GeneratedCodec: Sized {
-    const CORE_TYPE: ScopedCoreTypeId;
+    const CORE_TYPE: ScopedEncodedTypeId;
 
     fn decode(block: &Block, names: &mut NameTable) -> Result<Self, DecodeError>;
     fn encode(&self, resolver: &dyn NameResolver) -> Result<Block, EncodeError>;
@@ -46,11 +45,11 @@ pub enum ConformanceError {
 /// Runs the conformance contract for one expected type over a fixture set.
 pub struct ConformanceHarness<'table> {
     evaluator: StructuralEvaluator<'table>,
-    expected: ScopedCoreTypeId,
+    expected: ScopedEncodedTypeId,
 }
 
 impl<'table> ConformanceHarness<'table> {
-    pub fn new(table: &'table AddressedStructuralTable, expected: ScopedCoreTypeId) -> Self {
+    pub fn new(table: &'table AddressedStructuralTable, expected: ScopedEncodedTypeId) -> Self {
         Self {
             evaluator: StructuralEvaluator::new(table),
             expected,
@@ -60,10 +59,10 @@ impl<'table> ConformanceHarness<'table> {
     /// Assert the generated codec `T` agrees with the evaluator on every fixture.
     pub fn check<T: GeneratedCodec>(&self, fixtures: &[Block]) -> Result<(), ConformanceError> {
         for block in fixtures {
-            let mut names_generated = NameTable::new();
+            let mut names_generated = NameTable::new(IdentifierNamespace::Fixture);
             let generated = T::decode(block, &mut names_generated);
 
-            let mut names_interpreted = NameTable::new();
+            let mut names_interpreted = NameTable::new(IdentifierNamespace::Fixture);
             let interpreted = self
                 .evaluator
                 .decode(self.expected, block, &mut names_interpreted);
@@ -82,7 +81,7 @@ impl<'table> ConformanceHarness<'table> {
                     let interpreted_block =
                         self.evaluator
                             .encode(self.expected, &mirror, &names_interpreted)?;
-                    if generated_block.canonical_text() != interpreted_block.canonical_text() {
+                    if generated_block != interpreted_block {
                         return Err(ConformanceError::CanonicalOutput);
                     }
                 }

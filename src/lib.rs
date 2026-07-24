@@ -7,7 +7,7 @@
 //!
 //! ## The kernel / authoring split
 //!
-//! [`StructuralForm`] is a minimal seven-case kernel. The psyche's named authoring
+//! [`StructuralForm`] is a minimal six-case kernel. The psyche's named authoring
 //! structs ([`authoring::ObjectSymbolPrefixedBlock`], [`authoring::DottedForm`]) live
 //! in the AUTHORING vocabulary and [`authoring::AuthoringForm::normalize`] to kernel
 //! forms before a form is ever hashed or evaluated, so the kernel stays small.
@@ -19,18 +19,18 @@
 //! - Codecs: [`codec::ConstructorCodec`] (asymmetric: many disjoint decode forms, one
 //!   canonical encode form) gathered per type in [`codec::StructuralEntry`].
 //! - Table: [`table::AddressedStructuralTable`] — the external sidecar keyed by
-//!   `ScopedCoreTypeId`, its content identity stored OUTSIDE the hashed payload and
+//!   `ScopedEncodedTypeId`, its content identity stored OUTSIDE the hashed payload and
 //!   EXCLUDED from Core value identity.
 //! - Disjointness: [`disjoint`] — conservative outer-shape validation; overlap it
 //!   cannot rule out is a hard error.
 //! - Evaluator: [`evaluator::StructuralEvaluator`] — the one trusted interpreter.
-//! - Mirror: [`value::StructuralValue`] — the Core-agnostic generic currency.
+//! - Value type: [`value::StructuralValue`] — the Core-agnostic generic structural value.
 //! - Conformance: [`conformance`] — the law-5 harness the generated codec will meet.
 //! - Fixtures: [`fixture`] — the proof-of-concept universe and the acceptance gate.
-//! - The Protos pairing: [`encoded_form`] — the TRUTH side ([`EncodedForm`] marker plus
-//!   the typed [`EncodedConversion`] layer conversion `EncodedForm<T> -> EncodedForm<X>`,
-//!   text-free) — beside [`textual_form`] — the VIEW side ([`Textual`] producing a
-//!   first-class [`TextualForm<T>`] value through the two organs).
+//! - The Protos pairing: [`encoded_form`] — the encoded-form side ([`EncodedForm`] marker
+//!   plus the typed [`EncodedConversion`] layer conversion `EncodedForm<T> -> EncodedForm<X>`,
+//!   text-free) — beside [`textual_form`] — the textual interface and view ([`Textual`]
+//!   produces a first-class [`TextualForm<T>`] through the nametree and structuretree).
 
 pub mod authoring;
 pub mod codec;
@@ -43,9 +43,9 @@ pub mod fixture;
 pub mod form;
 pub mod ids;
 pub mod table;
+mod text;
 pub mod textual_form;
 pub mod value;
-pub mod writer;
 
 pub use codec::{ConstructorCodec, StructuralEntry};
 pub use conformance::{ConformanceError, ConformanceHarness, GeneratedCodec};
@@ -53,17 +53,17 @@ pub use encoded_form::{Converted, EncodedConversion, EncodedForm};
 pub use error::{DecodeError, DisjointnessError, EncodeError, TableError};
 pub use evaluator::StructuralEvaluator;
 pub use form::{
-    AtomForm, CarrierLeaf, CaseExpectation, ForeignLeafId, LeafCodec, LeafForm, ScalarLeaf,
-    SequenceForm, SigilPosition, SigilSpec, StructuralForm,
+    AtomForm, CarrierLeaf, DelegationPayload, ForeignLeafId, LeafCodec, LeafForm, ScalarLeaf,
+    SequenceForm, StructuralForm,
 };
 pub use ids::{
-    CoreConstructorId, CoreUniverseId, FIXTURE_UNIVERSE, PositionalSignature, ScopedCoreTypeId,
-    StructuralRevision,
+    EncodedConstructorId, EncodedUniverseId, FIXTURE_UNIVERSE, PositionalSignature,
+    ScopedEncodedTypeId,
 };
+pub use raw_discovery::AtomCase;
 pub use table::{
-    AddressedStructuralTable, CoreLayoutIdentity, LeafCodecContractId, RawProfileIdentity,
+    AddressedStructuralTable, EncodedLayoutIdentity, LeafCodecContractId, RawProfileIdentity,
     StructuralTableDomain, TableIdentityPayload,
 };
 pub use textual_form::{ChunkName, TextChunk, Textual, TextualForm};
 pub use value::{ScalarValue, StructuralValue, StructuralValueDomain};
-pub use writer::CanonicalText;

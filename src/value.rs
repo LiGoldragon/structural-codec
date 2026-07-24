@@ -1,7 +1,7 @@
-//! The evaluator's generic currency: a Core-agnostic structural mirror of a decoded
-//! value. The concrete Core type is recovered by a generated codec (§4.5); the
-//! conformance laws prove the two agree. The mirror is content-identifiable, so law
-//! 4 can assert a value's identity never moves across table revisions.
+//! The evaluator's generic structural value type: a Core-agnostic representation of a
+//! decoded value. A generated codec recovers the concrete Core type (§4.5), and the
+//! conformance laws prove the two agree. The value type is content-identifiable; the
+//! delimiter-only law witnesses that changing delimiters leaves its identity unmoved.
 
 use content_identity::{ContentHash, DomainSeparation, HashDomain, LayoutVersion};
 use name_table::Identifier;
@@ -9,7 +9,7 @@ use raw_discovery::{Atom, Block};
 
 use content_identity::ArchiveError;
 
-/// A structural value — the shape both evaluator directions pivot on.
+/// A generic structural value — the value type both evaluator directions use.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 #[rkyv(
     serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source),
@@ -21,9 +21,9 @@ pub enum StructuralValue {
     Atom(Identifier),
     /// A flattened scalar leaf.
     Scalar(ScalarValue),
-    /// A delimited run of children. The delimiter itself is NOT stored: it is pure
-    /// syntax fixed by the constructor's form and recovered on encode, so a
-    /// delimiter-only textual revision does not move this value's identity (law 4).
+    /// A delimited run of children. The delimiter itself is NOT stored: delimiter-only
+    /// table revisions preserve the StructuralValue mirror hash; structural
+    /// respellings move it by design (law 4).
     /// This deviates from §4.4's pre-hardening sketch, which carried the delimiter.
     Delimited(#[rkyv(omit_bounds)] Vec<StructuralValue>),
     /// A right-associative application.
@@ -52,8 +52,8 @@ impl StructuralValue {
         }
     }
 
-    /// The content identity of this value, under its own hash domain. Text
-    /// evolution across table revisions must never move this hash (law 4).
+    /// The content identity of this value, under its own hash domain. Delimiter-only
+    /// table revisions preserve this hash; other structural respellings may move it.
     pub fn content_identity(&self) -> Result<ContentHash<StructuralValueDomain>, ArchiveError> {
         ContentHash::of_core(self)
     }
@@ -69,21 +69,52 @@ pub enum ScalarValue {
 }
 
 impl ScalarValue {
-    /// Render this scalar back to a raw block, inverting the flatten-then-parse
-    /// rejoin: dotted text rebuilds a right-associative `Application` chain (so
-    /// `-122.3` becomes `Application(-122, 3)` and `a.b.c` a three-atom chain),
-    /// and dot-free text is a bare atom.
+    /// Render this scalar back to a raw block. Numeric and boolean scalars use the
+    /// dotted rejoin; text follows the canonical string law: bare dotted text when
+    /// possible, parenthesized words when spaces require it, and pipe text otherwise.
     pub fn render_block(&self) -> Block {
-        let text = match self {
-            Self::Integer(value) => value.to_string(),
-            Self::Float(value) => value.to_string(),
-            Self::Text(value) => value.clone(),
-            Self::Boolean(value) => value.to_string(),
-        };
+        match self {
+            Self::Integer(value) => Self::render_dotted(&value.to_string()),
+            Self::Float(value) => Self::render_dotted(&value.to_string()),
+            Self::Boolean(value) => Self::render_dotted(&value.to_string()),
+            Self::Text(value) => Self::render_text(value),
+        }
+    }
+
+    fn render_text(value: &str) -> Block {
+        if Self::qualifies_as_bare_dotted_text(value) {
+            return Self::render_dotted(value);
+        }
+        if Self::qualifies_as_parenthesized_text(value) {
+            return Block::Delimited {
+                delimiter: raw_discovery::Delimiter::Parenthesis,
+                root_objects: value.split(' ').map(Self::render_dotted).collect(),
+            };
+        }
+        Block::PipeText(raw_discovery::PipeText::new(value))
+    }
+
+    fn qualifies_as_bare_dotted_text(value: &str) -> bool {
+        !value.is_empty()
+            && !value.contains(";;")
+            && value
+                .split('.')
+                .all(|segment| !segment.is_empty() && Atom::new(segment).qualifies_as_symbol())
+    }
+
+    fn qualifies_as_parenthesized_text(value: &str) -> bool {
+        value.contains(' ')
+            && !value
+                .chars()
+                .any(|character| character.is_whitespace() && character != ' ')
+            && value.split(' ').all(Self::qualifies_as_bare_dotted_text)
+    }
+
+    fn render_dotted(text: &str) -> Block {
         let segments: Vec<&str> = text.split('.').collect();
         let (last, leading) = segments
             .split_last()
-            .expect("split always yields at least one segment");
+            .expect("a split string always has one segment");
         let mut block = Block::Atom(Atom::new(*last));
         for segment in leading.iter().rev() {
             block = Block::Application {

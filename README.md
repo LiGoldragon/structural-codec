@@ -1,8 +1,3 @@
-> **DEPRECATED.** This crate is consolidated into
-> [LiGoldragon/protos](https://github.com/LiGoldragon/protos) as a member of the
-> protos cargo workspace. Every consumer now pins protos. This repository is kept
-> only for history; do not add new pins to it.
-
 # structural-codec
 
 The Core-associated, bidirectional, revisioned **structural-form kernel** of the
@@ -18,11 +13,13 @@ new textual dialects can be added without regenerating codecs.
 
 ## The kernel / authoring split
 
-`StructuralForm` is a minimal seven-case kernel:
+`StructuralForm` is a minimal six-case kernel:
 
 ```
-Product · Atom · Leaf · Literal · Application{head,payload} · Delimited{delimiter,sequence} · Delegate
+Atom · Leaf · Literal · Application{operator,head,payload} · Delimited{boundary,delimiter,sequence} · Delegate
 ```
+
+`SequenceForm` separately carries fixed products and bounded repetition.
 
 The psyche's named authoring structs (`ObjectSymbolPrefixedBlock`, `DottedForm`)
 live in a separate **authoring vocabulary** and `normalize()` to kernel forms
@@ -39,14 +36,21 @@ authored as an `ObjectSymbolPrefixedBlock` and normalizes to
   signature that must equal the constructor's Core field signature. A
   `StructuralEntry` gathers every constructor of one Core type.
 - **Table** — `AddressedStructuralTable` is the external sidecar keyed by
-  `ScopedCoreTypeId`. Its content identity is computed over `TableIdentityPayload`
+  `ScopedEncodedTypeId`. Its content identity is computed over `TableIdentityPayload`
   and stored **outside** that payload, and is **excluded** from Core value identity
   by construction (Core hashing never sees the table).
 - **Disjointness** — a conservative outer-shape checker: a pair of decode forms is
   accepted only when it can be *proven* that no block matches both. Overlap it
   cannot rule out is a hard error.
 - **Evaluator** — `StructuralEvaluator` is the one trusted interpreter, both
-  directions, over the generic `StructuralValue` mirror.
+  directions, over the generic `StructuralValue` mirror. It recognizes and
+  emits text directly from the expected form's active trigger set; it never
+  constructs a preliminary token stream. Decode alternatives at one expected
+  type share their initial triggers, so an inactive alternative cannot swallow
+  structure needed to select another.
+- **Token profile** — the table pins a separately sealed profile identity.
+  Application, boundary, atom, and leaf positions carry compact trigger
+  identifiers, while table data carries the universal trivia set.
 - **Conformance** — `ConformanceHarness` / `GeneratedCodec` is the law-5 contract a
   future `nota-derive`-generated codec will implement; today the evaluator is the
   sole implementation.
@@ -57,7 +61,7 @@ The conformance laws are the acceptance gate (see `tests/laws.rs`):
 
 1. `decode ∘ encode = core`
 2. `encode ∘ decode = canonical(raw)`
-3. a failed decode leaves the NameTable unchanged (archived bytes and content identity)
+3. a failed decode or reify leaves the NameTable unchanged (archived bytes and content identity)
 4. old-table decode → new-table encode preserves Core value identity
 5. interpreter and generated codec agree (scaffolding; evaluator is sole implementer)
 
@@ -73,6 +77,6 @@ cargo test
 
 ## Status
 
-Version 0.1.0, proof-of-concept. The fixture universe in `src/fixture.rs` is the
-worked acceptance gate; `ScopedCoreTypeId` is scoped to an explicit fixture
-universe while the "unit of one schema" question is parked with the psyche.
+Version 0.4.0. This micro-repository is the canonical structural-codec
+producer. Consumers take its exact immutable revisions through the
+producer-first train; it is not a compatibility mirror of a monorepo.

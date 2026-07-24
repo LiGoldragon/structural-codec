@@ -11,7 +11,7 @@
 //! - its **TextualForm** — one textual VIEW on that EncodedForm, produced and consumed
 //!   through a [`Textual`](crate::textual_form::Textual).
 //!
-//! [`EncodedForm`] marks the truth side. A concrete Core value type (`CoreSchema`, the
+//! [`EncodedForm`] marks the truth side. A concrete Core value type (`EncodedSchema`, the
 //! lowered logos item set) IS an EncodedForm for its language `T`; the marker ties the
 //! value family to the language identity the paired [`TextualForm`](crate::TextualForm)
 //! and [`Textual`](crate::textual_form::Textual) share.
@@ -20,11 +20,12 @@
 //!
 //! [`EncodedConversion`] is the reusable piece the library creates for the psyche's
 //! *real type conversion*: a language layer is converted to the next by moving its
-//! EncodedForm to another EncodedForm, threading the continuous nametree — and NO text
+//! EncodedForm to another EncodedForm, threading a composed nametree — and NO text
 //! appears anywhere on the path. The schema→logos lowering through the Nomos macros is
-//! the first instance: `CoreSchema` (EncodedForm of schema) plus its `NameTable` go in,
-//! the lowered logos items (EncodedForm of logos) plus the extended `NameTable` come
-//! out, entirely as typed data.
+//! the first instance: `EncodedSchema` (EncodedForm of schema) plus its `NameTable` go in,
+//! and the lowered logos items (EncodedForm of logos) plus a `NameTable` with a
+//! component-owned Logos home namespace and complete borrowed source namespace slices
+//! come out, entirely as typed data.
 //!
 //! ### On the generic spelling
 //!
@@ -42,7 +43,7 @@ use name_table::NameTable;
 /// The truth-side marker of the Protos pairing: a stringless, Core-associated encoded
 /// value family — the thing a [`Textual`](crate::textual_form::Textual) views and an
 /// [`EncodedConversion`] moves. Implemented by a language's own Core value type
-/// (`CoreSchema` and the lowered logos item set are the first instances), it carries no
+/// (`EncodedSchema` and the lowered logos item set are the first instances), it carries no
 /// text: names live in the nametree, shapes in the structuretree.
 ///
 /// [`Language`](Self::Language) is the `T` in `EncodedForm<T>` — the identity the paired
@@ -54,21 +55,23 @@ pub trait EncodedForm {
 }
 
 /// The output of an [`EncodedConversion`]: the produced target EncodedForm plus the
-/// extended, continuous nametree that resolves every identifier it carries. The
-/// nametree crosses the layer as ONE table — source indices preserved, target-only
-/// names appended — never two disjoint tables.
+/// composed nametree that resolves every identifier it carries. The target owns its
+/// home namespace and borrows each complete source namespace slice. Composition
+/// preserves identifier variants and local indices without copying, flattening, or
+/// renumbering names.
 #[derive(Clone, Debug)]
 pub struct Converted<Target> {
     /// The produced target EncodedForm (`EncodedForm<X>`).
     pub target: Target,
-    /// The extended, continuous nametree resolving the target's identifiers.
+    /// The composed nametree resolving the target's identifiers.
     pub names: NameTable,
 }
 
 /// A typed layer conversion `EncodedForm<T> -> EncodedForm<X>`, expressed entirely as
-/// data with NO text on the path. The continuous nametree crosses the layer: the source
-/// EncodedForm and its names go in, the target EncodedForm and the extended names come
-/// out. The schema→logos lowering through the Nomos macros is the first instance.
+/// data with NO text on the path. The composed nametree crosses the layer: the source
+/// EncodedForm and its names go in, and the target EncodedForm plus its component-owned
+/// home namespace and borrowed complete source slices come out. The schema→logos
+/// lowering through the Nomos macros is the first instance.
 ///
 /// The absence of any `&str` / `String` in this signature is the structural proof of the
 /// psyche's ruling: the conversion is a real type conversion, with no string
@@ -82,10 +85,11 @@ pub trait EncodedConversion {
     /// The conversion's typed failure.
     type Error;
 
-    /// Convert the source EncodedForm into the target, threading the continuous
+    /// Convert the source EncodedForm into the target, threading the composed
     /// nametree: `names` resolves the source identifiers, and the returned
-    /// [`Converted`] carries the extended nametree resolving the target's. No string is
-    /// read or written on this path.
+    /// [`Converted`] carries a target-owned home namespace plus complete borrowed source
+    /// slices resolving the target's identifiers. No string is read or written on this
+    /// path.
     fn convert(
         &self,
         source: &Self::Source,

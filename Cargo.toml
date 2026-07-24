@@ -1,6 +1,6 @@
 [package]
 name         = "structural-codec"
-version      = "0.2.0"
+version      = "0.4.0"
 edition      = "2024"
 rust-version = "1.85"
 license      = "MIT OR Apache-2.0"
@@ -13,9 +13,9 @@ name = "structural_codec"
 path = "src/lib.rs"
 
 [dependencies]
-content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "6cc0408cdb96f174cc8fdf6ca23420038de28450" }
-name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "c3237f77c087e6feab49d6cf34971cebc14a11e6" }
-raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "a4e8c6df84e6a487ca6fe2f3641f9bafd0b0d8c8" }
+content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "076a48954b0cdb416b6aca1203da811e2146a731" }
+name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "d9f871236bd0ebe240da5860133afb288a27b81b" }
+raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "53afc9a1479aad3f4188b6c4f2ab62f3b6537d47" }
 rkyv             = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 thiserror        = "2"
 

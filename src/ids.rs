@@ -19,9 +19,9 @@
     PartialOrd,
 )]
 #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord))]
-pub struct CoreUniverseId(u32);
+pub struct EncodedUniverseId(u32);
 
-impl CoreUniverseId {
+impl EncodedUniverseId {
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
@@ -32,10 +32,10 @@ impl CoreUniverseId {
 }
 
 /// The explicit fixture universe for this proof-of-concept.
-pub const FIXTURE_UNIVERSE: CoreUniverseId = CoreUniverseId::new(0);
+pub const FIXTURE_UNIVERSE: EncodedUniverseId = EncodedUniverseId::new(0);
 
 /// A Core-type identity scoped to a universe. Replaces the earlier bare
-/// `CoreTypeId(u32)`: two universes may reuse local numbers without collision.
+/// `EncodedTypeId(u32)`: two universes may reuse local numbers without collision.
 #[derive(
     rkyv::Archive,
     rkyv::Serialize,
@@ -50,13 +50,13 @@ pub const FIXTURE_UNIVERSE: CoreUniverseId = CoreUniverseId::new(0);
     PartialOrd,
 )]
 #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord))]
-pub struct ScopedCoreTypeId {
-    pub universe: CoreUniverseId,
+pub struct ScopedEncodedTypeId {
+    pub universe: EncodedUniverseId,
     pub local: u32,
 }
 
-impl ScopedCoreTypeId {
-    pub const fn new(universe: CoreUniverseId, local: u32) -> Self {
+impl ScopedEncodedTypeId {
+    pub const fn new(universe: EncodedUniverseId, local: u32) -> Self {
         Self { universe, local }
     }
 
@@ -81,13 +81,13 @@ impl ScopedCoreTypeId {
     PartialEq,
     PartialOrd,
 )]
-pub struct CoreConstructorId {
-    pub core_type: ScopedCoreTypeId,
+pub struct EncodedConstructorId {
+    pub core_type: ScopedEncodedTypeId,
     pub constructor: u32,
 }
 
-impl CoreConstructorId {
-    pub const fn new(core_type: ScopedCoreTypeId, constructor: u32) -> Self {
+impl EncodedConstructorId {
+    pub const fn new(core_type: ScopedEncodedTypeId, constructor: u32) -> Self {
         Self {
             core_type,
             constructor,
@@ -101,45 +101,18 @@ impl CoreConstructorId {
 #[derive(
     rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default, Eq, Hash, PartialEq,
 )]
-pub struct PositionalSignature(Vec<ScopedCoreTypeId>);
+pub struct PositionalSignature(Vec<ScopedEncodedTypeId>);
 
 impl PositionalSignature {
-    pub fn new(fields: Vec<ScopedCoreTypeId>) -> Self {
+    pub fn new(fields: Vec<ScopedEncodedTypeId>) -> Self {
         Self(fields)
     }
 
-    pub fn fields(&self) -> &[ScopedCoreTypeId] {
+    pub fn fields(&self) -> &[ScopedEncodedTypeId] {
         &self.0
     }
 
     pub fn arity(&self) -> usize {
         self.0.len()
-    }
-}
-
-/// A monotone revision number for a structural table. Bumped whenever the
-/// textual surface changes; the Core side never observes it.
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-)]
-pub struct StructuralRevision(u32);
-
-impl StructuralRevision {
-    pub const fn new(value: u32) -> Self {
-        Self(value)
-    }
-
-    pub const fn value(self) -> u32 {
-        self.0
     }
 }

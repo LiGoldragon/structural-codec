@@ -11,7 +11,7 @@ use raw_discovery::{Block, Recognizer};
 use structural_codec::fixture::{COMMIT_SEQUENCE, FixtureBuilder};
 use structural_codec::{
     AddressedStructuralTable, ConformanceHarness, DecodeError, EncodeError, GeneratedCodec,
-    ScopedCoreTypeId, StructuralEvaluator, StructuralValue,
+    ScopedEncodedTypeId, StructuralEvaluator, StructuralValue,
 };
 
 fn fixture_table() -> &'static AddressedStructuralTable {
@@ -23,7 +23,7 @@ fn fixture_table() -> &'static AddressedStructuralTable {
 struct EvaluatorBackedCodec(StructuralValue);
 
 impl GeneratedCodec for EvaluatorBackedCodec {
-    const CORE_TYPE: ScopedCoreTypeId = COMMIT_SEQUENCE;
+    const CORE_TYPE: ScopedEncodedTypeId = COMMIT_SEQUENCE;
 
     fn decode(block: &Block, names: &mut NameTable) -> Result<Self, DecodeError> {
         let evaluator = StructuralEvaluator::new(fixture_table());

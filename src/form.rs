@@ -1,19 +1,19 @@
 //! The kernel `StructuralForm`: the minimal, revisioned, bidirectional vocabulary
 //! the trusted evaluator reads in both directions. A form is DATA — it carries no
 //! parsing code. The authoring vocabulary (`crate::authoring`) normalizes to these
-//! seven cases before a form is ever hashed or evaluated, so the kernel stays small.
+//! six cases before a form is ever hashed or evaluated, so the kernel stays small.
 //!
 //! The recursive cases (`Product`, `Application`, `Delimited`) carry the same rkyv
 //! bound attributes raw-discovery proved on its `Block`, so an entire form tree is
 //! content-identified data.
 
 use name_table::Identifier;
-use raw_discovery::{Atom, AtomCase, Delimiter};
+use raw_discovery::{Atom, AtomCase, Delimiter, TriggerIdentifier};
 
-use crate::ids::ScopedCoreTypeId;
+use crate::ids::ScopedEncodedTypeId;
 
-/// The seven-case kernel. `macro` is reserved for Nomos; the parser-side data is a
-/// `StructuralForm` (settled terminology, design §4.1).
+/// The six-case kernel. `macro` is reserved for Nomos; textual structure is
+/// represented as `StructuralForm` data (settled terminology, design §4.1).
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 #[rkyv(
     serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source),
@@ -21,9 +21,7 @@ use crate::ids::ScopedCoreTypeId;
     bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
 )]
 pub enum StructuralForm {
-    /// Heterogeneous positional tuple over a run of sibling blocks.
-    Product(#[rkyv(omit_bounds)] Vec<StructuralForm>),
-    /// A single bare atom, case- and sigil-constrained; always resolves to a name.
+    /// A single bare atom, case-constrained; always resolves to a name.
     Atom(AtomForm),
     /// A scalar leaf (flatten-then-parse) or an explicit carrier.
     Leaf(LeafForm),
@@ -31,6 +29,8 @@ pub enum StructuralForm {
     Literal(Identifier),
     /// Right-associative application `head.payload`.
     Application {
+        /// The profile trigger that spells the application operator.
+        operator: TriggerIdentifier,
         #[rkyv(omit_bounds)]
         head: Box<StructuralForm>,
         #[rkyv(omit_bounds)]
@@ -38,31 +38,61 @@ pub enum StructuralForm {
     },
     /// A delimiter around a sequence (the sequence algebra).
     Delimited {
+        /// The profile trigger that supplies this group's opening and closing
+        /// boundary spellings.
+        boundary: TriggerIdentifier,
         delimiter: Delimiter,
         #[rkyv(omit_bounds)]
         sequence: SequenceForm,
     },
-    /// Constructs a wrapper level over another Core type. Transparent cycles are
-    /// rejected; recursion is permitted only after consuming structure.
-    Delegate(ScopedCoreTypeId),
+    /// Constructs a wrapper level over another Core type. An optional typed
+    /// payload constrains how that expected-type position reads input.
+    /// Transparent cycles are rejected; recursion is permitted only after
+    /// consuming structure.
+    Delegate {
+        target: ScopedEncodedTypeId,
+        payload: Option<DelegationPayload>,
+    },
 }
 
 impl StructuralForm {
     /// A bare PascalCase name atom — the dominant declaration head.
     pub fn pascal_atom() -> Self {
-        Self::Atom(AtomForm::with_case(CaseExpectation::PascalCase))
+        Self::Atom(AtomForm::with_case(AtomCase::PascalCase))
     }
 
     /// A bare camelCase name atom.
     pub fn camel_atom() -> Self {
-        Self::Atom(AtomForm::with_case(CaseExpectation::CamelCase))
+        Self::Atom(AtomForm::with_case(AtomCase::CamelCase))
     }
 
     /// A right-associative `head.payload` application.
-    pub fn application(head: StructuralForm, payload: StructuralForm) -> Self {
+    pub fn application(
+        operator: TriggerIdentifier,
+        head: StructuralForm,
+        payload: StructuralForm,
+    ) -> Self {
         Self::Application {
+            operator,
             head: Box::new(head),
             payload: Box::new(payload),
+        }
+    }
+
+    /// A transparent delegation with no position-specific direction.
+    pub fn delegate(target: ScopedEncodedTypeId) -> Self {
+        Self::Delegate {
+            target,
+            payload: None,
+        }
+    }
+
+    /// A delegation whose expected-type position is directed by sealed typed
+    /// payload data.
+    pub fn delegate_with_payload(target: ScopedEncodedTypeId, payload: DelegationPayload) -> Self {
+        Self::Delegate {
+            target,
+            payload: Some(payload),
         }
     }
 }
@@ -108,26 +138,43 @@ impl SequenceForm {
     }
 }
 
-/// A single bare atom, case- and sigil-constrained.
+/// A single bare atom, constrained only by its raw capitalization class.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct AtomForm {
     /// `None` accepts any case.
-    pub case: Option<CaseExpectation>,
-    /// The `$` escape rides here as a sigil; `None` requires no sigil.
-    pub sigil: Option<SigilSpec>,
+    pub case: Option<AtomCase>,
+    /// An optional profile trigger that recognizes this atom carrier. `None`
+    /// reads the negative space between the active position's triggers.
+    pub trigger: Option<TriggerIdentifier>,
 }
 
 impl AtomForm {
-    pub fn with_case(case: CaseExpectation) -> Self {
+    /// An atom that accepts every raw capitalization class.
+    pub fn any_case() -> Self {
         Self {
-            case: Some(case),
-            sigil: None,
+            case: None,
+            trigger: None,
         }
     }
 
-    /// Whether a discovered atom satisfies this form's case constraint. (Sigil
-    /// matching is reserved for the not-yet-accepted `$` profile.)
-    pub fn accepts(&self, atom: &Atom) -> bool {
+    /// Constrain this atom with raw-discovery's public, partitioned predicate.
+    pub fn with_case(case: AtomCase) -> Self {
+        Self {
+            case: Some(case),
+            trigger: None,
+        }
+    }
+
+    /// Constrain case and recognize the spelling through one profile trigger.
+    pub fn with_trigger(case: Option<AtomCase>, trigger: TriggerIdentifier) -> Self {
+        Self {
+            case,
+            trigger: Some(trigger),
+        }
+    }
+
+    /// Whether a discovered atom satisfies this form's case constraint.
+    pub fn accepts_case(&self, atom: &Atom) -> bool {
         match self.case {
             None => true,
             Some(expected) => expected.matches(atom),
@@ -135,42 +182,34 @@ impl AtomForm {
     }
 }
 
-/// The capitalization expectation — mirrors raw-discovery's `AtomCase`.
+/// Closed, typed data that directs one expected-type delegation position.
+///
+/// The atom case is the deliberately small first payload kind: it generalizes the
+/// existing case expectation without reviving the unused sigil surface. Future
+/// direction must add a new enum variant, which makes table identity and the
+/// disjointness proof change deliberately.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CaseExpectation {
-    Symbol,
-    PascalCase,
-    CamelCase,
-    KebabCase,
+pub enum DelegationPayload {
+    /// Require the delegated position to receive an atom of this case before its
+    /// target entry is evaluated.
+    AtomCase(AtomCase),
 }
 
-impl CaseExpectation {
-    /// The raw-discovery case this expectation corresponds to.
-    pub fn raw_case(self) -> AtomCase {
+impl DelegationPayload {
+    /// Whether this payload accepts a discovered atom at the delegated position.
+    pub fn accepts_atom(self, atom: &Atom) -> bool {
         match self {
-            Self::Symbol => AtomCase::Symbol,
-            Self::PascalCase => AtomCase::PascalCase,
-            Self::CamelCase => AtomCase::CamelCase,
-            Self::KebabCase => AtomCase::KebabCase,
+            Self::AtomCase(case) => case.matches(atom),
         }
     }
 
-    pub fn matches(self, atom: &Atom) -> bool {
-        AtomCase::of(atom) == self.raw_case()
+    /// The structural constraint that the disjointness prover combines with the
+    /// delegated target's decode forms.
+    pub(crate) fn constraint_form(self) -> StructuralForm {
+        match self {
+            Self::AtomCase(case) => StructuralForm::Atom(AtomForm::with_case(case)),
+        }
     }
-}
-
-/// The `$`-style sigil specification. Reserved for the Nomos-extended profile.
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct SigilSpec {
-    pub character: String,
-    pub position: SigilPosition,
-}
-
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SigilPosition {
-    Prefix,
-    Suffix,
 }
 
 /// The leaf/carrier model. A leaf either flattens-and-parses a scalar (the rejoin
@@ -179,12 +218,24 @@ pub enum SigilPosition {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct LeafForm {
     pub codec: LeafCodec,
+    /// An optional profile trigger that carries this leaf. `None` reads the
+    /// negative space between the active position's triggers.
+    pub trigger: Option<TriggerIdentifier>,
 }
 
 impl LeafForm {
     pub fn scalar(scalar: ScalarLeaf) -> Self {
         Self {
             codec: LeafCodec::Scalar(scalar),
+            trigger: None,
+        }
+    }
+
+    /// A leaf recognized and emitted through one profile trigger.
+    pub fn with_trigger(codec: LeafCodec, trigger: TriggerIdentifier) -> Self {
+        Self {
+            codec,
+            trigger: Some(trigger),
         }
     }
 }

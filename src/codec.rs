@@ -4,7 +4,7 @@
 //! signature (§4.6). A `StructuralEntry` gathers every constructor of one Core type.
 
 use crate::form::StructuralForm;
-use crate::ids::{CoreConstructorId, PositionalSignature, ScopedCoreTypeId};
+use crate::ids::{EncodedConstructorId, PositionalSignature, ScopedEncodedTypeId};
 
 /// One Core constructor's codec.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -14,7 +14,7 @@ use crate::ids::{CoreConstructorId, PositionalSignature, ScopedCoreTypeId};
     bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
 )]
 pub struct ConstructorCodec {
-    pub constructor: CoreConstructorId,
+    pub constructor: EncodedConstructorId,
     /// Disjoint accepted inputs, proved non-shadowing by the disjointness checker.
     #[rkyv(omit_bounds)]
     pub decode_forms: Vec<StructuralForm>,
@@ -27,7 +27,7 @@ pub struct ConstructorCodec {
 
 impl ConstructorCodec {
     pub fn new(
-        constructor: CoreConstructorId,
+        constructor: EncodedConstructorId,
         decode_forms: Vec<StructuralForm>,
         encode_form: StructuralForm,
         signature: PositionalSignature,
@@ -49,13 +49,13 @@ impl ConstructorCodec {
     bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
 )]
 pub struct StructuralEntry {
-    pub core_type: ScopedCoreTypeId,
+    pub core_type: ScopedEncodedTypeId,
     #[rkyv(omit_bounds)]
     pub constructors: Vec<ConstructorCodec>,
 }
 
 impl StructuralEntry {
-    pub fn new(core_type: ScopedCoreTypeId, constructors: Vec<ConstructorCodec>) -> Self {
+    pub fn new(core_type: ScopedEncodedTypeId, constructors: Vec<ConstructorCodec>) -> Self {
         Self {
             core_type,
             constructors,
