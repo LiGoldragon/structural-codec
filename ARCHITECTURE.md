@@ -61,18 +61,27 @@ agreement. This is why a `ConstructorCodec` is data, not codegen-only.
   failing leaves the NameTable byte-for-byte unchanged (law 3).
 - Recognition is boundary-first and recursive. The current expected form
   activates an unordered sealed trigger set, universal longest-complete-match
-  is applied only within that set, and the evaluator immediately descends into
-  the expected child form. There is no preliminary token stream, annotation
-  tree, authored precedence, parser callback, or second textual engine.
+  is applied only within that set, and a delimited form discovers its complete
+  outside boundary before any expected child is interpreted. There is no
+  preliminary token stream, annotation tree, authored precedence, parser
+  callback, or second textual engine.
 - Decode alternatives under one expected type share the union of their initial
   triggers while that alternative is selected. A candidate is accepted only
   after it reaches the enclosing terminator, a sequence trivia boundary, or end
   of input. This preserves structural disjointness without making alternatives'
   declaration order semantic.
-- A delimited form carries its boundary trigger. Its interior is evaluated
-  under the boundary terminator plus each expected child form's own triggers,
-  so configured carriers consume their bodies before a surrounding closer is
-  considered.
+- A delimited form carries its boundary trigger. The table seal derives an
+  exact discovery set from its reachable interior boundary/carrier forms and
+  universal trivia, rejecting horizontal triggers from that state. The shared
+  raw reader balances nested boundaries and skips configured carriers while it
+  partitions the whole group into opening/interior/closing ranges. Only then
+  does the evaluator recurse through a `TextReading` bounded to the interior.
+  Products, repetitions, applications, and failed children cannot read across
+  that bound.
+- Safe alternative mismatch remains backtrackable. Once an expected opener is
+  matched, malformed boundary/carrier structure and bounded-child failures are
+  committed typed errors with byte ranges; they never collapse into
+  `NoAlternative`.
 - **Delegation constructs every wrapper level** and rejects transparent cycles;
   recursion is permitted only after structure is consumed (left-recursion guard).
 - The `Text` scalar leaf and the `Float` scalar leaf share one control path: a
@@ -117,4 +126,7 @@ Behaviour that changes a public contract, the storage/wire archive layout, or
 the table-identity pre-image must bump the relevant layout version
 (`HashDomain` layout tags) or state why none is needed. Layout 6 adds recursive
 position triggers and the canonical trivia set. Absolute digest tests lock
-every contextual hash domain so archive-image drift is a red test.
+every contextual hash domain so archive-image drift is a red test. Boundary
+regions are ephemeral UTF-8-checked cursor state and are not archived; this
+correction therefore leaves the layout-6 table and layout-1 value pre-images
+unchanged.

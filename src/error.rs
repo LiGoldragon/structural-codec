@@ -105,6 +105,16 @@ pub enum DecodeError {
     },
     #[error("text remained after the expected root form at byte {byte_offset}")]
     TrailingText { byte_offset: usize },
+    #[error(
+        "child decoding failed inside boundary {boundary:?} interior [{start}, {end}): {source}"
+    )]
+    BoundedInterior {
+        boundary: TriggerIdentifier,
+        start: usize,
+        end: usize,
+        #[source]
+        source: Box<DecodeError>,
+    },
     #[error("a repeated textual form succeeded without advancing the reader")]
     TextReaderDidNotAdvance,
     #[error(transparent)]

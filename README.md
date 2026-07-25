@@ -44,7 +44,9 @@ authored as an `ObjectSymbolPrefixedBlock` and normalizes to
   cannot rule out is a hard error.
 - **Evaluator** — `StructuralEvaluator` is the one trusted interpreter, both
   directions, over the generic `StructuralValue` mirror. It recognizes and
-  emits text directly from the expected form's active trigger set; it never
+  emits text directly from the expected form's active trigger set. A delimited
+  form first partitions its complete enclosing boundary through
+  `raw-discovery`, then recurses over the explicitly bounded interior; it never
   constructs a preliminary token stream. Decode alternatives at one expected
   type share their initial triggers, so an inactive alternative cannot swallow
   structure needed to select another.
@@ -77,6 +79,6 @@ cargo test
 
 ## Status
 
-Version 0.4.0. This micro-repository is the canonical structural-codec
+Version 0.5.0. This micro-repository is the canonical structural-codec
 producer. Consumers take its exact immutable revisions through the
 producer-first train; it is not a compatibility mirror of a monorepo.

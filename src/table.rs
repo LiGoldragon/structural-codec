@@ -158,6 +158,14 @@ impl AddressedStructuralTable {
         payload: &TableIdentityPayload,
         profile: &SealedTokenProfile,
     ) -> Result<(), TableError> {
+        for identifier in payload.trivia_triggers.triggers() {
+            Self::require_trigger_kind(profile, *identifier, "trivia", |kind| {
+                matches!(
+                    kind,
+                    Trigger::Whitespace { .. } | Trigger::LineComment { .. }
+                )
+            })?;
+        }
         profile.seal_trigger_set(payload.trivia_triggers.clone())?;
         for entry in payload.entries.values() {
             let initial =
@@ -260,26 +268,24 @@ impl AddressedStructuralTable {
                     inherited,
                     Some(*boundary),
                 )?;
-                let child_terminators = [*boundary];
+                let discovery =
+                    Self::boundary_discovery_triggers(sequence, *boundary, payload, profile)?;
+                profile.seal_boundary_discovery_set(discovery)?;
                 match sequence {
                     SequenceForm::Product(forms) => {
                         for child in forms {
                             Self::validate_form_position(
                                 child,
-                                &child_terminators,
+                                &[],
                                 payload,
                                 profile,
                                 delegate_path,
                             )?;
                         }
                     }
-                    SequenceForm::Repeat { element, .. } => Self::validate_form_position(
-                        element,
-                        &child_terminators,
-                        payload,
-                        profile,
-                        delegate_path,
-                    )?,
+                    SequenceForm::Repeat { element, .. } => {
+                        Self::validate_form_position(element, &[], payload, profile, delegate_path)?
+                    }
                 }
             }
             StructuralForm::Delegate { target, .. } => {
@@ -311,6 +317,105 @@ impl AddressedStructuralTable {
                     }
                 }
                 delegate_path.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    fn boundary_discovery_triggers(
+        sequence: &SequenceForm,
+        boundary: TriggerIdentifier,
+        payload: &TableIdentityPayload,
+        profile: &SealedTokenProfile,
+    ) -> Result<TriggerSet, TableError> {
+        let mut triggers = payload.trivia_triggers.triggers().to_vec();
+        triggers.push(boundary);
+        Self::boundary_sequence_triggers(
+            sequence,
+            payload,
+            profile,
+            &mut BTreeSet::new(),
+            &mut triggers,
+        )?;
+        Ok(TriggerSet::new(triggers))
+    }
+
+    fn boundary_sequence_triggers(
+        sequence: &SequenceForm,
+        payload: &TableIdentityPayload,
+        profile: &SealedTokenProfile,
+        path: &mut BTreeSet<ScopedEncodedTypeId>,
+        triggers: &mut Vec<TriggerIdentifier>,
+    ) -> Result<(), TableError> {
+        match sequence {
+            SequenceForm::Product(forms) => {
+                for form in forms {
+                    Self::boundary_form_triggers(form, payload, profile, path, triggers)?;
+                }
+            }
+            SequenceForm::Repeat { element, .. } => {
+                Self::boundary_form_triggers(element, payload, profile, path, triggers)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn boundary_form_triggers(
+        form: &StructuralForm,
+        payload: &TableIdentityPayload,
+        profile: &SealedTokenProfile,
+        path: &mut BTreeSet<ScopedEncodedTypeId>,
+        triggers: &mut Vec<TriggerIdentifier>,
+    ) -> Result<(), TableError> {
+        match form {
+            StructuralForm::Atom(_) | StructuralForm::Literal(_) => {}
+            StructuralForm::Leaf(leaf) => {
+                if let Some(identifier) = leaf.trigger
+                    && matches!(
+                        profile.definition(identifier)?.trigger,
+                        Trigger::Carrier { .. }
+                    )
+                {
+                    triggers.push(identifier);
+                }
+            }
+            StructuralForm::Application {
+                head,
+                payload: application_payload,
+                ..
+            } => {
+                Self::boundary_form_triggers(head, payload, profile, path, triggers)?;
+                Self::boundary_form_triggers(
+                    application_payload,
+                    payload,
+                    profile,
+                    path,
+                    triggers,
+                )?;
+            }
+            StructuralForm::Delimited {
+                boundary, sequence, ..
+            } => {
+                triggers.push(*boundary);
+                Self::boundary_sequence_triggers(sequence, payload, profile, path, triggers)?;
+            }
+            StructuralForm::Delegate { target, .. } => {
+                if !path.insert(*target) {
+                    return Ok(());
+                }
+                let entry = payload
+                    .entries
+                    .get(target)
+                    .ok_or(TableError::MissingLexicalDelegateTarget { target: *target })?;
+                for target_form in entry.constructors.iter().flat_map(|codec| {
+                    codec
+                        .decode_forms
+                        .iter()
+                        .chain(std::iter::once(&codec.encode_form))
+                }) {
+                    Self::boundary_form_triggers(target_form, payload, profile, path, triggers)?;
+                }
+                path.remove(target);
             }
         }
         Ok(())

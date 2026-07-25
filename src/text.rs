@@ -2,15 +2,17 @@
 //!
 //! This is an implementation surface of [`StructuralEvaluator`], not a second
 //! engine. It asks the current expected form for its active trigger set, matches
-//! only that set at the cursor, and recurses immediately. No preliminary token
-//! stream or parallel annotation tree exists.
+//! only that set at the cursor, partitions a delimited form's complete outside
+//! boundary, and then recurses inside the returned source bound. No preliminary
+//! token stream or parallel annotation tree exists.
 
 use std::collections::BTreeSet;
 
 use name_table::{NameInterner, NameResolver, NameTable, NameTransaction};
 use raw_discovery::{
-    Atom, BoundaryReader, BoundarySide, SealedTokenProfile, SealedTriggerSet, Trigger,
-    TriggerIdentifier, TriggerMatch, TriggerMatchKind, TriggerSet,
+    Atom, BoundaryReader, BoundarySide, DelimitedBoundary, SealedBoundaryDiscoverySet,
+    SealedTokenProfile, SealedTriggerSet, SourceBound, Trigger, TriggerIdentifier, TriggerMatch,
+    TriggerMatchKind, TriggerSet,
 };
 
 use crate::error::{DecodeError, EncodeError};
@@ -22,6 +24,7 @@ use crate::value::{ScalarValue, StructuralValue};
 struct TextReading<'source> {
     source: &'source str,
     byte_offset: usize,
+    bound: SourceBound,
 }
 
 impl<'source> TextReading<'source> {
@@ -29,6 +32,15 @@ impl<'source> TextReading<'source> {
         Self {
             source,
             byte_offset: 0,
+            bound: SourceBound::whole(source),
+        }
+    }
+
+    fn within(source: &'source str, bound: SourceBound) -> Self {
+        Self {
+            source,
+            byte_offset: bound.start(),
+            bound,
         }
     }
 
@@ -41,16 +53,16 @@ impl<'source> TextReading<'source> {
     }
 
     fn is_end(&self) -> bool {
-        self.byte_offset == self.source.len()
+        self.byte_offset == self.bound.end()
     }
 
     fn boundary<'profile>(
         &self,
         profile: &'profile SealedTokenProfile,
-    ) -> BoundaryReader<'source, 'profile> {
-        let mut boundary = BoundaryReader::new(self.source, profile);
+    ) -> Result<BoundaryReader<'source, 'profile>, DecodeError> {
+        let mut boundary = BoundaryReader::within(self.source, profile, self.bound)?;
         boundary.advance_to(self.byte_offset);
-        boundary
+        Ok(boundary)
     }
 
     fn skip_trivia(
@@ -58,7 +70,7 @@ impl<'source> TextReading<'source> {
         profile: &SealedTokenProfile,
         active: &SealedTriggerSet,
     ) -> Result<(), DecodeError> {
-        let mut boundary = self.boundary(profile);
+        let mut boundary = self.boundary(profile)?;
         boundary.skip_trivia(active)?;
         self.byte_offset = boundary.byte_offset();
         Ok(())
@@ -69,7 +81,7 @@ impl<'source> TextReading<'source> {
         profile: &SealedTokenProfile,
         active: &SealedTriggerSet,
     ) -> Result<Option<TriggerMatch>, DecodeError> {
-        Ok(self.boundary(profile).longest_match(active)?)
+        Ok(self.boundary(profile)?.longest_match(active)?)
     }
 
     fn consume(
@@ -77,7 +89,7 @@ impl<'source> TextReading<'source> {
         profile: &SealedTokenProfile,
         active: &SealedTriggerSet,
     ) -> Result<Option<TriggerMatch>, DecodeError> {
-        let mut boundary = self.boundary(profile);
+        let mut boundary = self.boundary(profile)?;
         let matched = boundary.consume(active)?;
         self.byte_offset = boundary.byte_offset();
         Ok(matched)
@@ -88,10 +100,22 @@ impl<'source> TextReading<'source> {
         profile: &SealedTokenProfile,
         active: &SealedTriggerSet,
     ) -> Result<Option<String>, DecodeError> {
-        let mut boundary = self.boundary(profile);
+        let mut boundary = self.boundary(profile)?;
         let bare = boundary.read_bare(active)?;
         self.byte_offset = boundary.byte_offset();
         Ok(bare)
+    }
+
+    fn discover_delimited(
+        &mut self,
+        profile: &SealedTokenProfile,
+        identifier: TriggerIdentifier,
+        active: &SealedBoundaryDiscoverySet,
+    ) -> Result<DelimitedBoundary, DecodeError> {
+        let mut boundary = self.boundary(profile)?;
+        let delimited = boundary.discover_delimited(identifier, active)?;
+        self.byte_offset = boundary.byte_offset();
+        Ok(delimited)
     }
 }
 
@@ -175,6 +199,7 @@ impl StructuralEvaluator<'_> {
                             payload: Box::new(draft),
                         });
                     }
+                    Err(error) if Self::committed_text_error(&error) => return Err(error),
                     Ok(_) | Err(_) => reading.restore(mark),
                 }
             }
@@ -254,21 +279,52 @@ impl StructuralEvaluator<'_> {
             StructuralForm::Delimited {
                 boundary, sequence, ..
             } => {
-                self.consume_expected(
-                    reading,
-                    &position_triggers,
-                    *boundary,
-                    |kind| matches!(kind, TriggerMatchKind::Boundary(BoundarySide::Opening)),
-                    "opening boundary",
+                let profile = self.checked_profile_decode()?;
+                let opening_active =
+                    self.active_set(profile, &position_triggers, Some(*boundary))?;
+                reading.skip_trivia(profile, &opening_active)?;
+                let opening = reading.longest_match(profile, &opening_active)?.ok_or(
+                    DecodeError::ExpectedTrigger {
+                        expected: *boundary,
+                        found: None,
+                    },
                 )?;
-                let children = self.match_text_sequence(sequence, reading, *boundary)?;
-                self.consume_expected(
-                    reading,
-                    &[],
-                    *boundary,
-                    |kind| matches!(kind, TriggerMatchKind::Boundary(BoundarySide::Closing)),
-                    "closing boundary",
-                )?;
+                if opening.identifier() != *boundary {
+                    return Err(DecodeError::ExpectedTrigger {
+                        expected: *boundary,
+                        found: Some(opening.identifier()),
+                    });
+                }
+                if !matches!(
+                    opening.kind(),
+                    TriggerMatchKind::Boundary(BoundarySide::Opening)
+                ) {
+                    return Err(DecodeError::ExpectedTriggerRole {
+                        identifier: *boundary,
+                        expected: "opening boundary",
+                    });
+                }
+
+                let discovery = self.boundary_discovery_set(sequence, *boundary)?;
+                let delimited = reading.discover_delimited(profile, *boundary, &discovery)?;
+                let mut interior = TextReading::within(reading.source, delimited.interior());
+                let children = (|| {
+                    let children = self.match_text_sequence(sequence, &mut interior)?;
+                    let trailing = self.active_set(profile, &[], None)?;
+                    interior.skip_trivia(profile, &trailing)?;
+                    if !interior.is_end() {
+                        return Err(DecodeError::TrailingText {
+                            byte_offset: interior.byte_offset,
+                        });
+                    }
+                    Ok(children)
+                })()
+                .map_err(|source| DecodeError::BoundedInterior {
+                    boundary: *boundary,
+                    start: delimited.interior().start(),
+                    end: delimited.interior().end(),
+                    source: Box::new(source),
+                })?;
                 Ok(DecodeDraft::Delimited(children))
             }
             StructuralForm::Delegate { target, payload } => {
@@ -294,12 +350,11 @@ impl StructuralEvaluator<'_> {
         &self,
         sequence: &SequenceForm,
         reading: &mut TextReading<'_>,
-        boundary: TriggerIdentifier,
     ) -> Result<Vec<DecodeDraft>, DecodeError> {
         match sequence {
             SequenceForm::Product(forms) => forms
                 .iter()
-                .map(|form| self.match_text_form(form, reading, &[boundary], &[], true, &[]))
+                .map(|form| self.match_text_form(form, reading, &[], &[], true, &[]))
                 .collect(),
             SequenceForm::Repeat {
                 minimum,
@@ -307,20 +362,11 @@ impl StructuralEvaluator<'_> {
                 element,
             } => {
                 let profile = self.checked_profile_decode()?;
-                let active = self.active_set(profile, &[], Some(boundary))?;
+                let active = self.active_set(profile, &[], None)?;
                 let mut children = Vec::new();
                 loop {
                     reading.skip_trivia(profile, &active)?;
-                    if reading
-                        .longest_match(profile, &active)?
-                        .is_some_and(|matched| {
-                            matched.identifier() == boundary
-                                && matches!(
-                                    matched.kind(),
-                                    TriggerMatchKind::Boundary(BoundarySide::Closing)
-                                )
-                        })
-                    {
+                    if reading.is_end() {
                         break;
                     }
                     if maximum.is_some_and(|maximum| children.len() as u64 == maximum) {
@@ -329,14 +375,7 @@ impl StructuralEvaluator<'_> {
                         });
                     }
                     let mark = reading.mark();
-                    children.push(self.match_text_form(
-                        element,
-                        reading,
-                        &[boundary],
-                        &[],
-                        true,
-                        &[],
-                    )?);
+                    children.push(self.match_text_form(element, reading, &[], &[], true, &[])?);
                     if reading.mark() == mark {
                         return Err(DecodeError::TextReaderDidNotAdvance);
                     }
@@ -425,6 +464,103 @@ impl StructuralEvaluator<'_> {
         triggers.extend_from_slice(inherited);
         triggers.extend(own);
         profile.seal_trigger_set(TriggerSet::new(triggers))
+    }
+
+    fn boundary_discovery_set(
+        &self,
+        sequence: &SequenceForm,
+        boundary: TriggerIdentifier,
+    ) -> Result<SealedBoundaryDiscoverySet, DecodeError> {
+        let profile = self.checked_profile_decode()?;
+        let mut triggers = self.table.trivia_triggers().triggers().to_vec();
+        triggers.push(boundary);
+        self.boundary_sequence_triggers(sequence, profile, &mut BTreeSet::new(), &mut triggers)?;
+        Ok(profile.seal_boundary_discovery_set(TriggerSet::new(triggers))?)
+    }
+
+    fn boundary_sequence_triggers(
+        &self,
+        sequence: &SequenceForm,
+        profile: &SealedTokenProfile,
+        path: &mut BTreeSet<ScopedEncodedTypeId>,
+        triggers: &mut Vec<TriggerIdentifier>,
+    ) -> Result<(), DecodeError> {
+        match sequence {
+            SequenceForm::Product(forms) => {
+                for form in forms {
+                    self.boundary_form_triggers(form, profile, path, triggers)?;
+                }
+            }
+            SequenceForm::Repeat { element, .. } => {
+                self.boundary_form_triggers(element, profile, path, triggers)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn boundary_form_triggers(
+        &self,
+        form: &StructuralForm,
+        profile: &SealedTokenProfile,
+        path: &mut BTreeSet<ScopedEncodedTypeId>,
+        triggers: &mut Vec<TriggerIdentifier>,
+    ) -> Result<(), DecodeError> {
+        match form {
+            StructuralForm::Atom(_) | StructuralForm::Literal(_) => {}
+            StructuralForm::Leaf(leaf) => {
+                if let Some(identifier) = leaf.trigger
+                    && matches!(
+                        profile.definition(identifier)?.trigger,
+                        Trigger::Carrier { .. }
+                    )
+                {
+                    triggers.push(identifier);
+                }
+            }
+            StructuralForm::Application { head, payload, .. } => {
+                self.boundary_form_triggers(head, profile, path, triggers)?;
+                self.boundary_form_triggers(payload, profile, path, triggers)?;
+            }
+            StructuralForm::Delimited {
+                boundary, sequence, ..
+            } => {
+                triggers.push(*boundary);
+                self.boundary_sequence_triggers(sequence, profile, path, triggers)?;
+            }
+            StructuralForm::Delegate { target, .. } => {
+                if !path.insert(*target) {
+                    return Ok(());
+                }
+                let entry = self
+                    .table
+                    .entry(*target)
+                    .ok_or(DecodeError::UnknownType(*target))?;
+                for target_form in entry
+                    .constructors
+                    .iter()
+                    .flat_map(|codec| codec.decode_forms.iter())
+                {
+                    self.boundary_form_triggers(target_form, profile, path, triggers)?;
+                }
+                path.remove(target);
+            }
+        }
+        Ok(())
+    }
+
+    fn committed_text_error(error: &DecodeError) -> bool {
+        matches!(error, DecodeError::BoundedInterior { .. })
+            || matches!(
+                error,
+                DecodeError::TokenProfile(
+                    raw_discovery::TokenProfileError::UnclosedBoundary { .. }
+                        | raw_discovery::TokenProfileError::MismatchedBoundary { .. }
+                        | raw_discovery::TokenProfileError::UnclosedCarrier { .. }
+                        | raw_discovery::TokenProfileError::InvalidSourceBound { .. }
+                        | raw_discovery::TokenProfileError::InactiveBoundary { .. }
+                        | raw_discovery::TokenProfileError::UnsupportedBoundaryDiscoveryTrigger(_)
+                )
+            )
     }
 
     fn position_is_complete(
