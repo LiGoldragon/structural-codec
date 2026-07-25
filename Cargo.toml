@@ -13,9 +13,9 @@ name = "structural_codec"
 path = "src/lib.rs"
 
 [dependencies]
-content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "076a48954b0cdb416b6aca1203da811e2146a731" }
-name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "d9f871236bd0ebe240da5860133afb288a27b81b" }
-raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "42be69de9a823cf221812369e64ba176655027d6" }
+content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "ac0075842799b3ece8909ad0eb4b8a92b596b188" }
+name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "a1705ef512efec28925ae3ffc9faa5a2aa4dc4a8" }
+raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "c27a9efabb1981c8b3d887c870fff82fc7daf49c" }
 rkyv             = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 thiserror        = "2"
 
