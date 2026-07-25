@@ -65,19 +65,30 @@ agreement. This is why a `ConstructorCodec` is data, not codegen-only.
   outside boundary before any expected child is interpreted. There is no
   preliminary token stream, annotation tree, authored precedence, parser
   callback, or second textual engine.
+- Boundary discovery is an ephemeral structural preflight over the expected
+  form. It advances one sequence position at a time, changing the active
+  trigger set when it enters a child or moves to a sibling. A trigger owned by
+  a later sibling is therefore negative-space data in the current position.
+  The preflight retains only the current form's checked source bounds; it does
+  not persist a parallel annotation tree or enter content identity.
 - Decode alternatives under one expected type share the union of their initial
   triggers while that alternative is selected. A candidate is accepted only
   after it reaches the enclosing terminator, a sequence trivia boundary, or end
   of input. This preserves structural disjointness without making alternatives'
   declaration order semantic.
 - A delimited form carries its boundary trigger. The table seal derives an
-  exact discovery set from its reachable interior boundary/carrier forms and
-  universal trivia, rejecting horizontal triggers from that state. The shared
-  raw reader balances nested boundaries and skips configured carriers while it
-  partitions the whole group into opening/interior/closing ranges. Only then
-  does the evaluator recurse through a `TextReading` bounded to the interior.
-  Products, repetitions, applications, and failed children cannot read across
-  that bound.
+  exact trigger set for every sequence position from that position's form,
+  universal trivia, and its enclosing boundary/FOLLOW set. It never unions
+  triggers reachable from later siblings. The shared evaluator walks those
+  sealed states outside-in until it finds the matching close, then interprets
+  children through a `TextReading` bounded to that interior. Products,
+  repetitions, applications, and failed children cannot read across that
+  bound.
+- An application is structurally preflighted before either side is interpreted:
+  its expected outside operator partitions checked head and payload bounds.
+  Operators inside a carrier or nested delimited child are inactive while that
+  child is bounded, so no semantic head decode can consume or manufacture the
+  split.
 - Safe alternative mismatch remains backtrackable. Once an expected opener is
   matched, malformed boundary/carrier structure and bounded-child failures are
   committed typed errors with byte ranges; they never collapse into

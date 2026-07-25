@@ -268,24 +268,29 @@ impl AddressedStructuralTable {
                     inherited,
                     Some(*boundary),
                 )?;
-                let discovery =
-                    Self::boundary_discovery_triggers(sequence, *boundary, payload, profile)?;
-                profile.seal_boundary_discovery_set(discovery)?;
+                let mut interior_terminators = Self::boundary_terminators(profile, inherited)?;
+                interior_terminators.push(*boundary);
+                interior_terminators.sort_unstable();
+                interior_terminators.dedup();
                 match sequence {
                     SequenceForm::Product(forms) => {
                         for child in forms {
                             Self::validate_form_position(
                                 child,
-                                &[],
+                                &interior_terminators,
                                 payload,
                                 profile,
                                 delegate_path,
                             )?;
                         }
                     }
-                    SequenceForm::Repeat { element, .. } => {
-                        Self::validate_form_position(element, &[], payload, profile, delegate_path)?
-                    }
+                    SequenceForm::Repeat { element, .. } => Self::validate_form_position(
+                        element,
+                        &interior_terminators,
+                        payload,
+                        profile,
+                        delegate_path,
+                    )?,
                 }
             }
             StructuralForm::Delegate { target, .. } => {
@@ -317,105 +322,6 @@ impl AddressedStructuralTable {
                     }
                 }
                 delegate_path.remove(&key);
-            }
-        }
-        Ok(())
-    }
-
-    fn boundary_discovery_triggers(
-        sequence: &SequenceForm,
-        boundary: TriggerIdentifier,
-        payload: &TableIdentityPayload,
-        profile: &SealedTokenProfile,
-    ) -> Result<TriggerSet, TableError> {
-        let mut triggers = payload.trivia_triggers.triggers().to_vec();
-        triggers.push(boundary);
-        Self::boundary_sequence_triggers(
-            sequence,
-            payload,
-            profile,
-            &mut BTreeSet::new(),
-            &mut triggers,
-        )?;
-        Ok(TriggerSet::new(triggers))
-    }
-
-    fn boundary_sequence_triggers(
-        sequence: &SequenceForm,
-        payload: &TableIdentityPayload,
-        profile: &SealedTokenProfile,
-        path: &mut BTreeSet<ScopedEncodedTypeId>,
-        triggers: &mut Vec<TriggerIdentifier>,
-    ) -> Result<(), TableError> {
-        match sequence {
-            SequenceForm::Product(forms) => {
-                for form in forms {
-                    Self::boundary_form_triggers(form, payload, profile, path, triggers)?;
-                }
-            }
-            SequenceForm::Repeat { element, .. } => {
-                Self::boundary_form_triggers(element, payload, profile, path, triggers)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn boundary_form_triggers(
-        form: &StructuralForm,
-        payload: &TableIdentityPayload,
-        profile: &SealedTokenProfile,
-        path: &mut BTreeSet<ScopedEncodedTypeId>,
-        triggers: &mut Vec<TriggerIdentifier>,
-    ) -> Result<(), TableError> {
-        match form {
-            StructuralForm::Atom(_) | StructuralForm::Literal(_) => {}
-            StructuralForm::Leaf(leaf) => {
-                if let Some(identifier) = leaf.trigger
-                    && matches!(
-                        profile.definition(identifier)?.trigger,
-                        Trigger::Carrier { .. }
-                    )
-                {
-                    triggers.push(identifier);
-                }
-            }
-            StructuralForm::Application {
-                head,
-                payload: application_payload,
-                ..
-            } => {
-                Self::boundary_form_triggers(head, payload, profile, path, triggers)?;
-                Self::boundary_form_triggers(
-                    application_payload,
-                    payload,
-                    profile,
-                    path,
-                    triggers,
-                )?;
-            }
-            StructuralForm::Delimited {
-                boundary, sequence, ..
-            } => {
-                triggers.push(*boundary);
-                Self::boundary_sequence_triggers(sequence, payload, profile, path, triggers)?;
-            }
-            StructuralForm::Delegate { target, .. } => {
-                if !path.insert(*target) {
-                    return Ok(());
-                }
-                let entry = payload
-                    .entries
-                    .get(target)
-                    .ok_or(TableError::MissingLexicalDelegateTarget { target: *target })?;
-                for target_form in entry.constructors.iter().flat_map(|codec| {
-                    codec
-                        .decode_forms
-                        .iter()
-                        .chain(std::iter::once(&codec.encode_form))
-                }) {
-                    Self::boundary_form_triggers(target_form, payload, profile, path, triggers)?;
-                }
-                path.remove(target);
             }
         }
         Ok(())
@@ -480,6 +386,24 @@ impl AddressedStructuralTable {
         triggers.extend(own);
         profile.seal_trigger_set(TriggerSet::new(triggers))?;
         Ok(())
+    }
+
+    fn boundary_terminators(
+        profile: &SealedTokenProfile,
+        candidates: &[TriggerIdentifier],
+    ) -> Result<Vec<TriggerIdentifier>, TokenProfileError> {
+        let mut boundaries = Vec::new();
+        for identifier in candidates {
+            if matches!(
+                profile.definition(*identifier)?.trigger,
+                Trigger::Boundary { .. }
+            ) {
+                boundaries.push(*identifier);
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        Ok(boundaries)
     }
 
     fn require_trigger_kind(

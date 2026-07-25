@@ -44,12 +44,15 @@ authored as an `ObjectSymbolPrefixedBlock` and normalizes to
   cannot rule out is a hard error.
 - **Evaluator** — `StructuralEvaluator` is the one trusted interpreter, both
   directions, over the generic `StructuralValue` mirror. It recognizes and
-  emits text directly from the expected form's active trigger set. A delimited
-  form first partitions its complete enclosing boundary through
-  `raw-discovery`, then recurses over the explicitly bounded interior; it never
-  constructs a preliminary token stream. Decode alternatives at one expected
-  type share their initial triggers, so an inactive alternative cannot swallow
-  structure needed to select another.
+  emits text directly from the expected form's active trigger set. Its
+  stack-local structural preflight advances through a sequence position by
+  position, discovers a delimited form's outside close before semantic child
+  decode, and partitions an application's outside operator before interpreting
+  either side. Later-sibling triggers never become active early. The evaluator
+  retains only checked current-form bounds and never constructs a preliminary
+  token stream or persistent annotation tree. Decode alternatives at one
+  expected type share their initial triggers, so an inactive alternative cannot
+  swallow structure needed to select another.
 - **Token profile** — the table pins a separately sealed profile identity.
   Application, boundary, atom, and leaf positions carry compact trigger
   identifiers, while table data carries the universal trivia set.

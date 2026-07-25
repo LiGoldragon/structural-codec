@@ -386,3 +386,277 @@ fn application_operator_is_sought_only_after_its_bounded_head_completes() {
         .expect("application canonical text");
     assert_eq!(canonical, "(inside.period).Outside");
 }
+
+#[test]
+fn sibling_triggers_activate_only_when_the_sequence_reaches_that_position() {
+    let form = delimited(
+        BRACE,
+        Delimiter::Brace,
+        SequenceForm::Product(vec![
+            StructuralForm::Leaf(LeafForm::scalar(ScalarLeaf::Text)),
+            pascal_group(SQUARE, Delimiter::SquareBracket),
+        ]),
+    );
+    let (table, profile) = standard_table([entry(OUTER, form)]);
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let source = "{alpha[beta [Inner]}";
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let value = evaluator
+        .decode_text(OUTER, source, &mut names)
+        .expect("the later square trigger is inactive in the first text position");
+    let canonical = evaluator
+        .encode_text(OUTER, &value, &names)
+        .expect("canonical sibling-state emission");
+    assert_eq!(canonical, source);
+    let mut names_again = NameTable::new(IdentifierNamespace::Fixture);
+    let again = evaluator
+        .decode_text(OUTER, &canonical, &mut names_again)
+        .expect("canonical sibling-state text re-decodes");
+    assert_eq!(
+        evaluator
+            .encode_text(OUTER, &again, &names_again)
+            .expect("canonical sibling-state text is idempotent"),
+        canonical
+    );
+}
+
+#[test]
+fn sibling_state_is_independent_of_top_level_alternative_order() {
+    let profile = RawProfile::standard().seal().expect("standard profile");
+    let sibling_form = delimited(
+        BRACE,
+        Delimiter::Brace,
+        SequenceForm::Product(vec![
+            StructuralForm::Leaf(LeafForm::scalar(ScalarLeaf::Text)),
+            pascal_group(SQUARE, Delimiter::SquareBracket),
+        ]),
+    );
+    let other = pascal_group(PARENTHESIS, Delimiter::Parenthesis);
+    let build = |decode_forms: Vec<StructuralForm>| {
+        table(
+            &profile,
+            TriggerSet::new(vec![WHITESPACE, COMMENT]),
+            [StructuralEntry::new(
+                OUTER,
+                vec![ConstructorCodec::new(
+                    EncodedConstructorId::new(OUTER, 0),
+                    decode_forms,
+                    sibling_form.clone(),
+                    PositionalSignature::default(),
+                )],
+            )],
+        )
+    };
+
+    for candidate in [
+        build(vec![sibling_form.clone(), other.clone()]),
+        build(vec![other, sibling_form.clone()]),
+    ] {
+        let evaluator = StructuralEvaluator::with_profile(&candidate, &profile);
+        let mut names = NameTable::new(IdentifierNamespace::Fixture);
+        let value = evaluator
+            .decode_text(OUTER, "{alpha[beta [Inner]}", &mut names)
+            .expect("alternative order cannot activate a later sibling early");
+        assert_eq!(
+            evaluator
+                .encode_text(OUTER, &value, &names)
+                .expect("alternative-order canonical text"),
+            "{alpha[beta [Inner]}"
+        );
+    }
+}
+
+#[test]
+fn several_sibling_trigger_sets_remain_position_local() {
+    let form = delimited(
+        BRACE,
+        Delimiter::Brace,
+        SequenceForm::Product(vec![
+            StructuralForm::Leaf(LeafForm::scalar(ScalarLeaf::Text)),
+            pascal_group(SQUARE, Delimiter::SquareBracket),
+            StructuralForm::Leaf(LeafForm::scalar(ScalarLeaf::Text)),
+            pascal_group(PARENTHESIS, Delimiter::Parenthesis),
+        ]),
+    );
+    let (table, profile) = standard_table([entry(OUTER, form)]);
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let source = "{first[raw [One] second(raw (Two)}";
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let value = evaluator
+        .decode_text(OUTER, source, &mut names)
+        .expect("each sibling activates only its own trigger set");
+    assert_eq!(
+        evaluator
+            .encode_text(OUTER, &value, &names)
+            .expect("multiple sibling-state canonical text"),
+        source
+    );
+}
+
+#[test]
+fn table_seal_proves_trigger_disjointness_per_sequence_position() {
+    let outer_boundary = TriggerIdentifier::new(20);
+    let first_sibling = TriggerIdentifier::new(21);
+    let second_sibling = TriggerIdentifier::new(22);
+    let whitespace = TriggerIdentifier::new(23);
+    let profile = TokenProfileData::new(
+        ProfileRevision::new(18),
+        vec![
+            TriggerDefinition {
+                identifier: outer_boundary,
+                trigger: Trigger::Boundary {
+                    opening: "{".to_owned(),
+                    closing: "}".to_owned(),
+                },
+            },
+            TriggerDefinition {
+                identifier: first_sibling,
+                trigger: Trigger::Boundary {
+                    opening: "<".to_owned(),
+                    closing: ">".to_owned(),
+                },
+            },
+            TriggerDefinition {
+                identifier: second_sibling,
+                trigger: Trigger::Boundary {
+                    opening: "<".to_owned(),
+                    closing: "/>".to_owned(),
+                },
+            },
+            TriggerDefinition {
+                identifier: whitespace,
+                trigger: Trigger::Whitespace {
+                    canonical_spelling: " ".to_owned(),
+                },
+            },
+        ],
+        TriggerSet::new(vec![outer_boundary, whitespace]),
+        String::new(),
+    )
+    .seal()
+    .expect("the root context never co-activates the sibling boundaries");
+    let form = delimited(
+        outer_boundary,
+        Delimiter::Brace,
+        SequenceForm::Product(vec![
+            pascal_group(first_sibling, Delimiter::Parenthesis),
+            pascal_group(second_sibling, Delimiter::SquareBracket),
+        ]),
+    );
+    let table = table(
+        &profile,
+        TriggerSet::new(vec![whitespace]),
+        [entry(OUTER, form)],
+    );
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let source = "{<One> <Two/>}";
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let value = evaluator
+        .decode_text(OUTER, source, &mut names)
+        .expect("same-opening sibling boundaries are disjoint by sequence state");
+    assert_eq!(
+        evaluator
+            .encode_text(OUTER, &value, &names)
+            .expect("per-position seal canonical text"),
+        source
+    );
+}
+
+#[test]
+fn application_preflight_ignores_operator_glyphs_inside_bounded_children() {
+    let carrier = StructuralForm::Leaf(LeafForm::with_trigger(
+        LeafCodec::Carrier(CarrierLeaf::PipeText),
+        PIPE_TEXT,
+    ));
+    let payload = delimited(
+        BRACE,
+        Delimiter::Brace,
+        SequenceForm::Product(vec![StructuralForm::Leaf(LeafForm::scalar(
+            ScalarLeaf::Text,
+        ))]),
+    );
+    let form = StructuralForm::application(APPLICATION, carrier, payload);
+    let (table, profile) = standard_table([entry(OUTER, form)]);
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let source = "(|left.right|).{payload.with.period}";
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let value = evaluator
+        .decode_text(OUTER, source, &mut names)
+        .expect("only the outside application operator partitions the form");
+    assert_eq!(
+        evaluator
+            .encode_text(OUTER, &value, &names)
+            .expect("bounded application canonical text"),
+        source
+    );
+}
+
+#[test]
+fn missing_outside_application_operator_is_a_safe_non_match() {
+    let carrier = StructuralForm::Leaf(LeafForm::with_trigger(
+        LeafCodec::Carrier(CarrierLeaf::PipeText),
+        PIPE_TEXT,
+    ));
+    let form = StructuralForm::application(APPLICATION, carrier, StructuralForm::pascal_atom());
+    let (table, profile) = standard_table([entry(OUTER, form)]);
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+
+    assert!(matches!(
+        evaluator.decode_text(OUTER, "(|head.with.period|)Payload", &mut names),
+        Err(DecodeError::NoAlternative { core_type }) if core_type == OUTER
+    ));
+}
+
+#[test]
+fn utf8_negative_space_keeps_structural_bounds_on_character_boundaries() {
+    let form = delimited(
+        BRACE,
+        Delimiter::Brace,
+        SequenceForm::Product(vec![
+            StructuralForm::Leaf(LeafForm::scalar(ScalarLeaf::Text)),
+            pascal_group(SQUARE, Delimiter::SquareBracket),
+        ]),
+    );
+    let (table, profile) = standard_table([entry(OUTER, form)]);
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let source = "{é[β [Inner]}";
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let value = evaluator
+        .decode_text(OUTER, source, &mut names)
+        .expect("UTF-8 text remains inside checked byte bounds");
+    assert_eq!(
+        evaluator
+            .encode_text(OUTER, &value, &names)
+            .expect("UTF-8 canonical text"),
+        source
+    );
+}
+
+#[test]
+fn sibling_state_failure_keeps_the_nametree_byte_identical() {
+    let form = delimited(
+        BRACE,
+        Delimiter::Brace,
+        SequenceForm::Product(vec![
+            StructuralForm::Leaf(LeafForm::scalar(ScalarLeaf::Text)),
+            pascal_group(SQUARE, Delimiter::SquareBracket),
+        ]),
+    );
+    let (table, profile) = standard_table([entry(OUTER, form)]);
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    names.intern(Name::new("Prior")).expect("prior name");
+    let before = names.to_archive_bytes().expect("before");
+    let identity_before = names.identity().expect("identity before");
+
+    assert!(matches!(
+        evaluator.decode_text(OUTER, "{alpha[beta [lower]}", &mut names),
+        Err(DecodeError::BoundedInterior { .. })
+    ));
+    assert_eq!(
+        before.as_ref(),
+        names.to_archive_bytes().expect("after").as_ref()
+    );
+    assert_eq!(identity_before, names.identity().expect("identity after"));
+}
