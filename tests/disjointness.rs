@@ -604,6 +604,200 @@ fn constructor_and_form_vector_order_never_select_meaning() {
 }
 
 #[test]
+fn productive_recursive_delegation_tracks_cursor_progress_and_preserves_drafts() {
+    let type_reference = ScopedEncodedTypeId::schema(0xf1e0);
+    let declarations = ScopedEncodedTypeId::schema(0xf1e1);
+    let pascal = || SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase));
+    let plain = atom(AtomCase::PascalCase);
+    let application = application(
+        pascal(),
+        SharedDescriptor::Delegate {
+            target: type_reference,
+            payload: None,
+        },
+    );
+    let declaration_list = application_delimited_with_element(
+        pascal(),
+        SharedDescriptor::Delegate {
+            target: type_reference,
+            payload: None,
+        },
+    );
+    let type_reference_entry = |reverse: bool| {
+        let mut codecs = vec![
+            codec(type_reference, 1, vec![(1, plain.clone())], plain.clone()),
+            codec(
+                type_reference,
+                2,
+                vec![(2, application.clone())],
+                application.clone(),
+            ),
+        ];
+        if reverse {
+            codecs.reverse();
+        }
+        entry(type_reference, codecs)
+    };
+    let make = |reverse: bool| {
+        seal_entries([
+            type_reference_entry(reverse),
+            one_constructor(declarations, declaration_list.clone()),
+        ])
+        .expect("the application head proves the recursive alternative guarded")
+    };
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let deep = std::iter::repeat_n("Node", 48)
+        .collect::<Vec<_>>()
+        .join(".");
+    let materialized_deep = std::iter::repeat_n("Node", 16)
+        .collect::<Vec<_>>()
+        .join(".");
+    let sources = vec![
+        "Topics.Vector".to_owned(),
+        "Topics.Vector.Topic".to_owned(),
+        materialized_deep,
+    ];
+    let mut observations = Vec::new();
+    for table in [make(false), make(true)] {
+        let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
+        let mut names = NameTable::new(IdentifierNamespace::Fixture);
+        let mut value_archives = Vec::new();
+        for source in &sources {
+            let value = evaluator
+                .decode_text(type_reference, source, &mut names)
+                .expect("every consumed application head permits its recursive payload");
+            assert_eq!(
+                evaluator
+                    .encode_text(type_reference, &value, &names)
+                    .expect("productive recursion encodes canonically"),
+                *source
+            );
+            value_archives.push(
+                value
+                    .to_archive_bytes()
+                    .expect("recursive value archive")
+                    .to_vec(),
+            );
+        }
+        evaluator
+            .decode_text_without_materializing(type_reference, &deep)
+            .expect("48 recursive payloads advance before the value mirror materializes");
+        assert_ne!(
+            value_archives[0], value_archives[1],
+            "one and two applications retain distinct recursive value shapes"
+        );
+        assert_ne!(
+            value_archives[1], value_archives[2],
+            "a deep application chain is not flattened into a shallower value"
+        );
+
+        let nested_source = "Container.{Topics.Vector.Topic RecordSet.Vector.Entry}";
+        let nested = evaluator
+            .decode_text(declarations, nested_source, &mut names)
+            .expect("productive recursion inside a delimited repeated product");
+        assert_eq!(
+            evaluator
+                .encode_text(declarations, &nested, &names)
+                .expect("nested recursive canonical text"),
+            nested_source
+        );
+
+        let before_archive = names
+            .to_archive_bytes()
+            .expect("names before malformed input");
+        let before_identity = names.identity().expect("identity before malformed input");
+        assert!(matches!(
+            evaluator.decode_text(type_reference, "Broken.Vector.", &mut names),
+            Err(DecodeError::NoAlternative { core_type }) if core_type == type_reference
+        ));
+        assert_eq!(
+            names
+                .to_archive_bytes()
+                .expect("names after malformed input")
+                .as_ref(),
+            before_archive.as_ref(),
+            "failed recursive candidates do not materialize draft names"
+        );
+        assert_eq!(
+            names.identity().expect("identity after malformed input"),
+            before_identity,
+            "failed recursive candidates retain the exact name identity"
+        );
+        assert!(
+            names.lookup(&Name::new("Broken")).is_none(),
+            "the rejected recursive head is still only a draft"
+        );
+
+        observations.push((
+            value_archives,
+            nested
+                .to_archive_bytes()
+                .expect("nested recursive value archive")
+                .to_vec(),
+            names
+                .to_archive_bytes()
+                .expect("recursive name archive")
+                .to_vec(),
+            names
+                .identity()
+                .expect("recursive name identity")
+                .to_hexadecimal(),
+        ));
+    }
+    assert_eq!(
+        observations[0], observations[1],
+        "constructor order does not change productive recursion or name allocation"
+    );
+}
+
+#[test]
+fn zero_progress_delegate_cycles_refuse_at_the_same_parse_state() {
+    let self_cycle = ScopedEncodedTypeId::schema(0xf1e2);
+    let self_table = seal_entry(one_constructor(
+        self_cycle,
+        unary(SharedDescriptor::Delegate {
+            target: self_cycle,
+            payload: None,
+        }),
+    ))
+    .expect("one transparent form has no alternative-disjointness proof to perform");
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let self_evaluator = StructuralEvaluator::with_profile(&self_table, &profile).expect("profile");
+    let mut self_names = NameTable::new(IdentifierNamespace::Fixture);
+    assert!(matches!(
+        self_evaluator.decode_text(self_cycle, "Cycle", &mut self_names),
+        Err(DecodeError::DelegationCycle(reentered)) if reentered == self_cycle
+    ));
+
+    let left = ScopedEncodedTypeId::schema(0xf1e3);
+    let right = ScopedEncodedTypeId::schema(0xf1e4);
+    let mutual_table = seal_entries([
+        one_constructor(
+            left,
+            unary(SharedDescriptor::Delegate {
+                target: right,
+                payload: None,
+            }),
+        ),
+        one_constructor(
+            right,
+            unary(SharedDescriptor::Delegate {
+                target: left,
+                payload: None,
+            }),
+        ),
+    ])
+    .expect("the runtime evaluator remains responsible for a single-form transparent cycle");
+    let mutual_evaluator =
+        StructuralEvaluator::with_profile(&mutual_table, &profile).expect("profile");
+    let mut mutual_names = NameTable::new(IdentifierNamespace::Fixture);
+    assert!(matches!(
+        mutual_evaluator.decode_text(left, "Cycle", &mut mutual_names),
+        Err(DecodeError::DelegationCycle(reentered)) if reentered == left
+    ));
+}
+
+#[test]
 fn alternative_completion_precedes_the_root_object_check() {
     let operator = TriggerIdentifier::new(31);
     let whitespace = TriggerIdentifier::new(32);
