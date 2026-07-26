@@ -48,7 +48,6 @@ pub mod evaluator;
 pub mod form;
 pub mod ids;
 pub mod table;
-mod text;
 pub mod textual_form;
 pub mod value;
 
@@ -73,9 +72,10 @@ pub use ids::{
 };
 pub use raw_discovery::AtomCase;
 pub use table::{
-    AddressedStructuralTable, ArchivedTablePayload, FixtureVocabularyDomain, StructuralTableDomain,
-    StructuralVocabularyDomain, StructuralVocabularyIdentity, TableIdentityPayload,
-    TargetLayoutDomain, TargetLayoutIdentity,
+    AddressedStructuralTable, ArchivedTablePayload, ContextualTextualPolicy,
+    FixtureVocabularyDomain, StructuralTableDomain, StructuralVocabularyDomain,
+    StructuralVocabularyIdentity, TableIdentityPayload, TargetLayoutDomain, TargetLayoutIdentity,
+    TextualRenderingPolicy,
 };
 pub use textual_form::{ChunkName, TextChunk, Textual, TextualForm};
 pub use value::{
@@ -92,6 +92,9 @@ mod boundary_first;
 #[cfg(test)]
 #[path = "../tests/conformance_harness.rs"]
 mod conformance_harness;
+#[cfg(test)]
+#[path = "../tests/contextual_textual.rs"]
+mod contextual_textual;
 #[cfg(test)]
 #[path = "../tests/disjointness.rs"]
 mod disjointness;

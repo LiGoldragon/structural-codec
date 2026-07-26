@@ -11,11 +11,12 @@ use raw_discovery::{
 };
 use structural_codec::{
     AcceptedDecodeForm, AddressedStructuralTable, AtomCase, AtomDescriptor, AuthoringError,
-    ChunkName, ConstructorCodec, DecodeError, DecodeFormId, EncodeError, EncodedConstructorId,
-    EncodedForm, EncodedLanguage, FieldEnd, FieldLink, FieldRole, FieldValue, Position,
-    RuleCoproduct, ScopedEncodedTypeId, SharedDescriptor, SingleChunkRequired, StructuralEntry,
-    StructuralValue, StructuralVocabularyIdentity, StructureRecord, TableError,
+    ChunkName, ConstructorCodec, ContextualTextualPolicy, DecodeError, DecodeFormId, EncodeError,
+    EncodedConstructorId, EncodedForm, EncodedLanguage, FieldEnd, FieldLink, FieldRole, FieldValue,
+    Position, RuleCoproduct, ScopedEncodedTypeId, SharedDescriptor, SingleChunkRequired,
+    StructuralEntry, StructuralValue, StructuralVocabularyIdentity, StructureRecord, TableError,
     TableIdentityPayload, TargetLayoutIdentity, TextChunk, Textual, TextualForm,
+    TextualRenderingPolicy,
 };
 
 const VALUE: ScopedEncodedTypeId = ScopedEncodedTypeId::schema(72);
@@ -200,6 +201,11 @@ impl ExternalTextual {
                         ),
                         vec![],
                     ),
+                    TextualRenderingPolicy::new(vec![ContextualTextualPolicy::new(
+                        BoundaryDiscoveryContextIdentifier::new(1),
+                        None,
+                        None,
+                    )]),
                     BTreeMap::from([(VALUE, entry)]),
                 ),
                 &profile,

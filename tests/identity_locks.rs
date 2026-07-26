@@ -25,7 +25,7 @@ fn final_combined_shape_digest_locks() {
     let table = FixtureBuilder::new().build().expect("table");
     assert_eq!(
         table.identity().to_hexadecimal(),
-        "49d0cdc188467f7e1bc03fcfa3035fd2ad2c322a9c68a50b55dc2943a3dfef6e"
+        "4395bb2ab8de70f5477359c3d4f9cc773774f000a3a62621d4cd4f61f58c0708"
     );
     let profile = FixtureBuilder::token_profile();
     let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");

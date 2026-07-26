@@ -121,6 +121,11 @@ fn configured_angle_boundary_decodes_and_encodes_without_a_compatibility_delimit
             profile.identity(),
             StructuralVocabularyIdentity::fixture(b"angle boundary vocabulary"),
             discovery,
+            crate::TextualRenderingPolicy::new(vec![crate::ContextualTextualPolicy::new(
+                root,
+                Some(whitespace),
+                None,
+            )]),
             BTreeMap::from([(COMMIT_SEQUENCE, entry)]),
         ),
         &profile,

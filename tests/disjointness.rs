@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 
 use name_table::{IdentifierNamespace, Name, NameTable, NameTableError};
-use raw_discovery::Recognizer;
 
 use crate::fixture::{APPLICATION_OPERATOR, BRACE_BOUNDARY};
 use crate::{
@@ -78,6 +77,7 @@ fn seal_entries(
             profile.identity(),
             StructuralVocabularyIdentity::fixture(b"disjointness typed-record vocabulary"),
             crate::fixture::FixtureBuilder::block_discovery(),
+            crate::fixture::FixtureBuilder::textual_rendering(),
             entries,
         ),
         &profile,
@@ -101,15 +101,6 @@ fn one_constructor(type_id: ScopedEncodedTypeId, rule: StructuralRule) -> Struct
         type_id,
         vec![codec(type_id, 1, vec![(1, rule.clone())], rule)],
     )
-}
-
-fn single_block(source: &str) -> raw_discovery::Block {
-    Recognizer::standard()
-        .recognize(source)
-        .expect("recognized source")
-        .root_object_at(0)
-        .expect("one root")
-        .clone()
 }
 
 #[test]
@@ -386,7 +377,7 @@ fn literal_lexicon_causes_are_preserved_without_alternative_fallback() {
         .expect("profile pin");
     let mut decoded_names = NameTable::new(IdentifierNamespace::Fixture);
     assert!(matches!(
-        evaluator.decode(TYPE, &single_block("Present"), &mut decoded_names),
+        evaluator.decode_text(TYPE, "Present", &mut decoded_names),
         Err(DecodeError::Names(NameTableError::UnknownNamespace(
             IdentifierNamespace::Schema
         )))
@@ -404,7 +395,7 @@ fn missing_lexicon_and_literal_encode_mismatch_keep_their_precise_errors() {
     let without_lexicon = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
     let mut names = NameTable::new(IdentifierNamespace::Fixture);
     assert!(matches!(
-        without_lexicon.decode(TYPE, &single_block("Expected"), &mut names),
+        without_lexicon.decode_text(TYPE, "Expected", &mut names),
         Err(DecodeError::MissingLexicon)
     ));
 
@@ -418,7 +409,7 @@ fn missing_lexicon_and_literal_encode_mismatch_keep_their_precise_errors() {
     let with_lexicon =
         StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon).expect("profile");
     assert!(matches!(
-        with_lexicon.encode(TYPE, &value, &lexicon),
+        with_lexicon.encode_text(TYPE, &value, &lexicon),
         Err(EncodeError::LiteralMismatch)
     ));
 }
@@ -433,7 +424,7 @@ fn unknown_type_is_terminal_and_never_falls_through_an_alternative() {
     let unknown = ScopedEncodedTypeId::schema(0xfffe);
     let mut names = NameTable::new(IdentifierNamespace::Fixture);
     assert!(matches!(
-        evaluator.decode(unknown, &single_block("Entry"), &mut names),
+        evaluator.decode_text(unknown, "Entry", &mut names),
         Err(DecodeError::UnknownType(actual)) if actual == unknown
     ));
 }
@@ -461,7 +452,7 @@ fn accepted_application_payload_non_match_falls_through_to_the_disjoint_form() {
     let mut names = NameTable::new(IdentifierNamespace::Fixture);
     assert_eq!(
         evaluator
-            .decode(TYPE, &single_block("Head.payload"), &mut names)
+            .decode_text(TYPE, "Head.payload", &mut names)
             .expect("second payload alternative")
             .constructor()
             .local(),
@@ -497,7 +488,7 @@ fn constructor_and_form_vector_order_never_select_meaning() {
         let mut names = NameTable::new(IdentifierNamespace::Fixture);
         assert_eq!(
             evaluator
-                .decode(TYPE, &single_block("Entry"), &mut names)
+                .decode_text(TYPE, "Entry", &mut names)
                 .expect("bare alternative")
                 .constructor()
                 .local(),
@@ -539,10 +530,10 @@ fn delegate_expansion_preserves_directed_payload_and_wrapper_value() {
     let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
     let mut names = NameTable::new(IdentifierNamespace::Fixture);
     let pascal = evaluator
-        .decode(outer, &single_block("Entry"), &mut names)
+        .decode_text(outer, "Entry", &mut names)
         .expect("Pascal delegate");
     let camel = evaluator
-        .decode(outer, &single_block("entry"), &mut names)
+        .decode_text(outer, "entry", &mut names)
         .expect("camel delegate");
     assert_eq!(pascal.constructor().local(), 1);
     assert_eq!(camel.constructor().local(), 2);
@@ -696,6 +687,7 @@ fn r4_ids_archive_as_distinct_language_variants_and_associations_are_checked() {
                 profile.identity(),
                 StructuralVocabularyIdentity::language(b"cross-language vocabulary"),
                 crate::fixture::FixtureBuilder::block_discovery(),
+                crate::fixture::FixtureBuilder::textual_rendering(),
                 BTreeMap::from([(logos_entry.encoded_type(), logos_entry)]),
             ),
             &profile,

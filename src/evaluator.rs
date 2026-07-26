@@ -1,9 +1,16 @@
-//! The one shared evaluator over archived typed records.
+//! The one shared, source-bounded evaluator over archived typed records.
 
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use name_table::{Name, NameInterner, NameResolver, NameTable};
-use raw_discovery::{Atom, Block, Delimiter, SealedTokenProfile, Trigger};
+use raw_discovery::{
+    Atom, BlockTree, BoundaryDiscoveryContextIdentifier, BoundaryReader, DiscoveredBlock,
+    DiscoveredBlockTree, SealedTokenProfile, SourceBound, Trigger, TriggerIdentifier,
+    TriggerMatchKind,
+};
 
 use crate::error::{DecodeError, EncodeError};
 use crate::form::{
@@ -13,6 +20,16 @@ use crate::form::{
 use crate::ids::{FieldRole, ScopedEncodedTypeId, StableRoleId};
 use crate::table::AddressedStructuralTable;
 use crate::value::{FieldValue, RoleKeyedMirror, ScalarValue, StructuralValue};
+
+#[cfg(test)]
+thread_local! {
+    static CURSOR_CHILD_INDEX_PROBES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn source_cursor_child_index_probes() -> usize {
+    CURSOR_CHILD_INDEX_PROBES.with(Cell::get)
+}
 
 struct DescriptorCollector {
     fields: BTreeMap<StableRoleId, SharedDescriptor>,
@@ -38,9 +55,212 @@ impl DecodeState {
     }
 }
 
-/// The trusted evaluator. A sealed profile is mandatory even for direct `Block`
-/// execution, so a boundary is validated from its authoritative trigger rather
-/// than guessed from raw-discovery's compatibility delimiter enum.
+/// One sequential reader inside a source bound already established by pass one.
+/// It holds only its current source byte and the next discovered child index;
+/// it never rescans a parent or searches for a closing boundary.
+#[derive(Clone)]
+struct BoundedCursor<'source, 'tree> {
+    source: &'source str,
+    bound: SourceBound,
+    children: &'tree [DiscoveredBlock],
+    child_index: usize,
+    position: usize,
+    context: BoundaryDiscoveryContextIdentifier,
+}
+
+impl<'source, 'tree> BoundedCursor<'source, 'tree> {
+    fn root(
+        source: &'source str,
+        tree: &'tree DiscoveredBlockTree,
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Self {
+        let bound = SourceBound::whole(source);
+        Self {
+            source,
+            bound,
+            children: tree.root_blocks(),
+            child_index: 0,
+            position: bound.start(),
+            context,
+        }
+    }
+
+    fn active<'table, Record: StructureRecord>(
+        &self,
+        evaluator: &'table StructuralEvaluator<'table, Record>,
+    ) -> Result<&'table raw_discovery::SealedTriggerSet, DecodeError> {
+        Ok(evaluator
+            .table
+            .block_discovery()
+            .active_triggers(self.context)
+            .map_err(raw_discovery::BlockDiscoveryError::from)?)
+    }
+
+    fn local_match<Record: StructureRecord>(
+        &self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+    ) -> Result<Option<raw_discovery::TriggerMatch>, DecodeError> {
+        let remaining = SourceBound::checked(self.source, self.position, self.bound.end())?;
+        Ok(
+            BoundaryReader::within(self.source, evaluator.profile, remaining)?
+                .longest_match(self.active(evaluator)?)?,
+        )
+    }
+
+    fn skip_trivia<Record: StructureRecord>(
+        &mut self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+    ) -> Result<(), DecodeError> {
+        while let Some(matched) = self.local_match(evaluator)? {
+            if !matched.is_trivia() {
+                break;
+            }
+            self.position = matched.end();
+        }
+        Ok(())
+    }
+
+    fn next_child_at_cursor(&self) -> Option<&'tree DiscoveredBlock> {
+        #[cfg(test)]
+        CURSOR_CHILD_INDEX_PROBES.with(|probes| probes.set(probes.get() + 1));
+        self.children.get(self.child_index).filter(|child| {
+            child.cue().bound().start() == self.position
+                && child.cue().bound().end() <= self.bound.end()
+        })
+    }
+
+    fn finish<Record: StructureRecord>(
+        &mut self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+    ) -> Result<bool, DecodeError> {
+        self.skip_trivia(evaluator)?;
+        Ok(self.position == self.bound.end() && self.child_index == self.children.len())
+    }
+
+    fn take_bare<Record: StructureRecord>(
+        &mut self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+        terminator: Option<&str>,
+    ) -> Result<SourceBound, DecodeError> {
+        self.skip_trivia(evaluator)?;
+        if self.position == self.bound.end() || self.next_child_at_cursor().is_some() {
+            return Err(DecodeError::BlockKindMismatch {
+                expected: "bare atom",
+                found: "source boundary",
+            });
+        }
+        if self.local_match(evaluator)?.is_some() {
+            return Err(DecodeError::BlockKindMismatch {
+                expected: "bare atom",
+                found: "source trigger",
+            });
+        }
+        let start = self.position;
+        while self.position < self.bound.end() {
+            if terminator.is_some_and(|text| self.source[self.position..].starts_with(text))
+                || self.next_child_at_cursor().is_some()
+                || self.local_match(evaluator)?.is_some()
+            {
+                break;
+            }
+            let character = self.source[self.position..self.bound.end()]
+                .chars()
+                .next()
+                .expect("the bounded cursor is inside source");
+            if evaluator.profile.bare_character_is_forbidden(character) {
+                return Err(raw_discovery::TokenProfileError::ForbiddenBareCharacter {
+                    character,
+                    byte_offset: self.position,
+                }
+                .into());
+            }
+            self.position += character.len_utf8();
+        }
+        if start == self.position {
+            return Err(DecodeError::LeafNotFlattenable);
+        }
+        Ok(SourceBound::checked(self.source, start, self.position)?)
+    }
+
+    fn take_carrier<Record: StructureRecord>(
+        &mut self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+    ) -> Result<Option<String>, DecodeError> {
+        self.skip_trivia(evaluator)?;
+        let Some(matched) = self.local_match(evaluator)? else {
+            return Ok(None);
+        };
+        if matched.kind() != TriggerMatchKind::Carrier {
+            return Ok(None);
+        }
+        self.position = matched.end();
+        Ok(Some(
+            matched
+                .body()
+                .expect("carrier trigger matches carry a body")
+                .to_owned(),
+        ))
+    }
+
+    fn take_boundary<Record: StructureRecord>(
+        &mut self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+        boundary: TriggerIdentifier,
+    ) -> Result<Self, DecodeError> {
+        self.skip_trivia(evaluator)?;
+        let child = self
+            .next_child_at_cursor()
+            .filter(|child| child.cue().evidence() == boundary)
+            .ok_or(DecodeError::BoundaryMismatch { boundary })?;
+        let context = evaluator
+            .table
+            .block_discovery()
+            .child_context(self.context, boundary)
+            .map_err(raw_discovery::BlockDiscoveryError::from)?;
+        self.position = child.source_bound().end();
+        self.child_index += 1;
+        let content = child.content_bound();
+        Ok(Self {
+            source: self.source,
+            bound: content,
+            children: child.children(),
+            child_index: 0,
+            position: content.start(),
+            context,
+        })
+    }
+
+    fn consume_operator<Record: StructureRecord>(
+        &mut self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+        identifier: TriggerIdentifier,
+    ) -> Result<(), DecodeError> {
+        let (Trigger::Application { glyph } | Trigger::Punctuation { glyph }) =
+            &evaluator.profile.definition(identifier)?.trigger
+        else {
+            return Err(DecodeError::BlockKindMismatch {
+                expected: "application trigger",
+                found: "profile trigger",
+            });
+        };
+        if !self.source[self.position..self.bound.end()].starts_with(glyph) {
+            return Err(DecodeError::BlockKindMismatch {
+                expected: "application",
+                found: "source",
+            });
+        }
+        self.position += glyph.len();
+        Ok(())
+    }
+
+    fn text(&self, bound: SourceBound) -> &'source str {
+        &self.source[bound.start()..bound.end()]
+    }
+}
+
+/// The trusted textual evaluator. Pass one owns recursive boundary discovery;
+/// this evaluator owns the single typed traversal of records, roles, products,
+/// sums, delegation, and repetition over the resulting bounded cursor.
 pub struct StructuralEvaluator<'table, Record = StructuralRule> {
     pub(crate) table: &'table AddressedStructuralTable<Record>,
     pub(crate) profile: &'table SealedTokenProfile,
@@ -48,8 +268,7 @@ pub struct StructuralEvaluator<'table, Record = StructuralRule> {
 }
 
 impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
-    /// Construct a text-capable evaluator from the table's sealed profile and
-    /// sealed discovery rules. This is the constructor used by `Textual`.
+    /// Construct the table-owned evaluator used by `Textual`.
     pub fn new(table: &'table AddressedStructuralTable<Record>) -> Result<Self, DecodeError> {
         Ok(Self {
             table,
@@ -58,7 +277,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         })
     }
 
-    /// Construct a table-owned evaluator with literal resolution data.
+    /// Construct the table-owned evaluator with literal resolution data.
     pub fn with_lexicon(
         table: &'table AddressedStructuralTable<Record>,
         lexicon: &'table NameTable,
@@ -68,8 +287,8 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         Ok(evaluator)
     }
 
-    /// Compatibility constructor for low-level `Block` evaluation. Textual
-    /// execution still uses the profile owned by `table`.
+    /// Compatibility constructor that verifies a supplied profile is the
+    /// table-owned profile. It does not restore a raw-`Block` evaluation path.
     pub fn with_profile(
         table: &'table AddressedStructuralTable<Record>,
         profile: &'table SealedTokenProfile,
@@ -80,6 +299,8 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         Self::new(table)
     }
 
+    /// Compatibility constructor with literal data; textual traversal remains
+    /// table/profile-owned.
     pub fn with_profile_and_lexicon(
         table: &'table AddressedStructuralTable<Record>,
         profile: &'table SealedTokenProfile,
@@ -91,30 +312,47 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         Self::with_lexicon(table, lexicon)
     }
 
-    pub fn decode(
+    /// Decode only after raw-discovery has constructed the whole block tree.
+    pub fn decode_text(
         &self,
         expected: ScopedEncodedTypeId,
-        block: &Block,
+        source: &str,
         names: &mut NameTable,
     ) -> Result<StructuralValue, DecodeError> {
-        names.try_intern(|transaction| self.decode_with_interner(expected, block, transaction))
+        names
+            .try_intern(|transaction| self.decode_text_with_interner(expected, source, transaction))
     }
 
-    pub fn decode_with_interner(
+    pub fn decode_text_with_interner(
         &self,
         expected: ScopedEncodedTypeId,
-        block: &Block,
+        source: &str,
         interner: &mut impl NameInterner,
     ) -> Result<StructuralValue, DecodeError> {
-        self.decode_type(expected, block, interner, &[])
+        #[cfg(test)]
+        CURSOR_CHILD_INDEX_PROBES.with(|probes| probes.set(0));
+        let tree =
+            DiscoveredBlockTree::discover(source, self.profile, self.table.block_discovery())?;
+        let mut cursor =
+            BoundedCursor::root(source, &tree, self.table.block_discovery().root_context());
+        cursor.skip_trivia(self)?;
+        if cursor.position == cursor.bound.end() {
+            return Err(DecodeError::RootObjectCount);
+        }
+        let value = self.decode_type(expected, &mut cursor, interner, &[], None)?;
+        cursor
+            .finish(self)?
+            .then_some(value)
+            .ok_or(DecodeError::RootObjectCount)
     }
 
     fn decode_type(
         &self,
         expected: ScopedEncodedTypeId,
-        block: &Block,
+        input: &mut BoundedCursor<'_, '_>,
         interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
+        terminator: Option<&str>,
     ) -> Result<StructuralValue, DecodeError> {
         if chain.contains(&expected) {
             return Err(DecodeError::DelegationCycle(expected));
@@ -127,10 +365,21 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         next_chain.push(expected);
         for codec in entry.constructors() {
             for accepted in codec.decode_forms() {
+                let mut candidate = input.clone();
                 let mut state = Self::state_for(accepted.rule());
                 let root = accepted.rule().root_role();
-                match self.decode_role(root, block, &mut state, interner, &next_chain) {
-                    Ok(_) => return Ok(StructuralValue::new(codec.constructor(), state.fields)),
+                match self.decode_role(
+                    root,
+                    &mut candidate,
+                    &mut state,
+                    interner,
+                    &next_chain,
+                    terminator,
+                ) {
+                    Ok(_) => {
+                        *input = candidate;
+                        return Ok(StructuralValue::new(codec.constructor(), state.fields));
+                    }
                     Err(error) if error.is_structural_non_match() => {}
                     Err(error) => return Err(error),
                 }
@@ -155,13 +404,15 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
     fn decode_role(
         &self,
         role: StableRoleId,
-        block: &Block,
+        input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState,
         interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
+        terminator: Option<&str>,
     ) -> Result<FieldValue, DecodeError> {
         let descriptor = state.descriptor(role)?.clone();
-        let value = self.decode_descriptor(&descriptor, block, state, interner, chain)?;
+        let value =
+            self.decode_descriptor(&descriptor, input, state, interner, chain, terminator)?;
         state.fields.insert(role, value.clone());
         Ok(value)
     }
@@ -169,59 +420,58 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
     fn decode_descriptor(
         &self,
         descriptor: &SharedDescriptor,
-        block: &Block,
+        input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState,
         interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
+        terminator: Option<&str>,
     ) -> Result<FieldValue, DecodeError> {
         match descriptor {
-            SharedDescriptor::Atom(atom_form) => {
-                let atom = block.atom().ok_or(DecodeError::BlockKindMismatch {
-                    expected: "atom",
-                    found: Self::block_kind(block),
-                })?;
-                if !atom_form.accepts(atom) {
+            SharedDescriptor::Atom(form) => {
+                let atom = self.take_source_atom(input, terminator)?;
+                if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
                 Ok(FieldValue::Atom(interner.intern(Name::new(atom.text()))?))
             }
             SharedDescriptor::Literal(identifier) => {
-                let atom = block.atom().ok_or(DecodeError::BlockKindMismatch {
-                    expected: "atom",
-                    found: Self::block_kind(block),
-                })?;
+                let atom = self.take_source_atom(input, terminator)?;
                 let lexicon = self.lexicon.ok_or(DecodeError::MissingLexicon)?;
                 if lexicon.resolve(*identifier)?.as_str() != atom.text() {
                     return Err(DecodeError::LiteralMismatch);
                 }
                 Ok(FieldValue::Atom(*identifier))
             }
-            SharedDescriptor::Leaf(codec) => {
-                Ok(FieldValue::Scalar(self.decode_leaf(codec, block)?))
-            }
+            SharedDescriptor::Leaf(codec) => Ok(FieldValue::Scalar(
+                self.decode_leaf(codec, input, terminator)?,
+            )),
             SharedDescriptor::Delegate { target, payload } => {
                 if let Some(payload) = payload {
-                    let atom = block
-                        .atom()
-                        .ok_or(DecodeError::DelegationPayloadMismatch { payload: *payload })?;
-                    if !payload.accepts(atom) {
+                    let mut preview = input.clone();
+                    let atom = self
+                        .take_source_atom(&mut preview, terminator)
+                        .map_err(|_| DecodeError::DelegationPayloadMismatch {
+                            payload: *payload,
+                        })?;
+                    if !payload.accepts(&atom) {
                         return Err(DecodeError::DelegationPayloadMismatch { payload: *payload });
                     }
                 }
-                Ok(FieldValue::Delegated(Box::new(
-                    self.decode_type(*target, block, interner, chain)?,
-                )))
+                Ok(FieldValue::Delegated(Box::new(self.decode_type(
+                    *target, input, interner, chain, terminator,
+                )?)))
             }
-            SharedDescriptor::Application { head, payload, .. } => {
-                let (head_block, payload_block) =
-                    block
-                        .as_application()
-                        .ok_or(DecodeError::BlockKindMismatch {
-                            expected: "application",
-                            found: Self::block_kind(block),
-                        })?;
-                let head = self.decode_role(*head, head_block, state, interner, chain)?;
-                let payload = self.decode_role(*payload, payload_block, state, interner, chain)?;
+            SharedDescriptor::Application {
+                operator,
+                head,
+                payload,
+            } => {
+                let operator_text = self.operator_text(*operator)?;
+                let head =
+                    self.decode_role(*head, input, state, interner, chain, Some(&operator_text))?;
+                input.consume_operator(self, *operator)?;
+                let payload =
+                    self.decode_role(*payload, input, state, interner, chain, terminator)?;
                 Ok(FieldValue::Application {
                     head: Box::new(head),
                     payload: Box::new(payload),
@@ -229,22 +479,25 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             }
             SharedDescriptor::Delimited { boundary, content }
             | SharedDescriptor::ItemBoundary { boundary, content } => {
-                let children = self.boundary_children(*boundary, block)?;
-                let content =
-                    self.decode_children_role(*content, children, state, interner, chain)?;
-                Ok(FieldValue::Delimited(Box::new(content)))
+                let mut interior = input.take_boundary(self, *boundary)?;
+                let value =
+                    self.decode_repeated_role(*content, &mut interior, state, interner, chain)?;
+                if !interior.finish(self)? {
+                    return Err(DecodeError::RepetitionCardinality { found: 0 });
+                }
+                Ok(FieldValue::Delimited(Box::new(value)))
             }
             SharedDescriptor::Repeated { .. } => Err(DecodeError::BlockKindMismatch {
                 expected: "repeated children",
-                found: Self::block_kind(block),
+                found: "source",
             }),
         }
     }
 
-    fn decode_children_role(
+    fn decode_repeated_role(
         &self,
         role: StableRoleId,
-        children: &[Block],
+        input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState,
         interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
@@ -258,94 +511,97 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         else {
             return Err(DecodeError::MissingRole { role });
         };
-        let found = u64::try_from(children.len()).expect("platform usize fits u64");
+        let mut values = Vec::new();
+        while !input.finish(self)? {
+            let before = input.position;
+            values.push(self.decode_descriptor(&element, input, state, interner, chain, None)?);
+            if input.position == before {
+                return Err(DecodeError::LeafNotFlattenable);
+            }
+        }
+        let found = u64::try_from(values.len()).expect("platform usize fits u64");
         if found < minimum || maximum.is_some_and(|top| found > top) {
             return Err(DecodeError::RepetitionCardinality { found });
         }
-        let values = children
-            .iter()
-            .map(|child| self.decode_descriptor(&element, child, state, interner, chain))
-            .collect::<Result<Vec<_>, _>>()?;
         let value = FieldValue::Repeated(values);
         state.fields.insert(role, value.clone());
         Ok(value)
     }
 
-    fn decode_leaf(&self, codec: &LeafCodec, block: &Block) -> Result<ScalarValue, DecodeError> {
+    fn take_source_atom(
+        &self,
+        input: &mut BoundedCursor<'_, '_>,
+        terminator: Option<&str>,
+    ) -> Result<Atom, DecodeError> {
+        let bound = input.take_bare(self, terminator)?;
+        let text = input.text(bound);
+        if text.contains('.') {
+            return Err(DecodeError::BlockKindMismatch {
+                expected: "atom",
+                found: "dotted source",
+            });
+        }
+        Ok(Atom::new(text))
+    }
+
+    fn decode_leaf(
+        &self,
+        codec: &LeafCodec,
+        input: &mut BoundedCursor<'_, '_>,
+        terminator: Option<&str>,
+    ) -> Result<ScalarValue, DecodeError> {
+        let mut carrier = input.clone();
+        if let Some(body) = carrier.take_carrier(self)? {
+            *input = carrier;
+            return match codec {
+                LeafCodec::Text | LeafCodec::PipeText => Ok(ScalarValue::Text(body)),
+                _ => Err(DecodeError::LeafNotFlattenable),
+            };
+        }
+        if matches!(codec, LeafCodec::PipeText) {
+            return Err(DecodeError::BlockKindMismatch {
+                expected: "pipe text",
+                found: "source",
+            });
+        }
+        let bound = input.take_bare(self, terminator)?;
+        let text = input.text(bound);
         match codec {
-            LeafCodec::Integer => block
-                .dotted_text()
-                .ok_or(DecodeError::LeafNotFlattenable)?
-                .parse()
-                .map(ScalarValue::Integer)
-                .map_err(|error: std::num::ParseIntError| {
-                    DecodeError::ScalarParse(error.to_string())
-                }),
-            LeafCodec::Float => block
-                .dotted_text()
-                .ok_or(DecodeError::LeafNotFlattenable)?
-                .parse()
-                .map(ScalarValue::Float)
-                .map_err(|error: std::num::ParseFloatError| {
-                    DecodeError::ScalarParse(error.to_string())
-                }),
-            LeafCodec::Text => match block {
-                Block::PipeText(text) => Ok(ScalarValue::Text(text.text().to_owned())),
-                _ => block
-                    .dotted_text()
-                    .map(ScalarValue::Text)
-                    .ok_or(DecodeError::LeafNotFlattenable),
-            },
-            LeafCodec::Boolean => match block.dotted_text().as_deref() {
-                Some("true") => Ok(ScalarValue::Boolean(true)),
-                Some("false") => Ok(ScalarValue::Boolean(false)),
-                Some(other) => Err(DecodeError::ScalarParse(format!(
+            LeafCodec::Integer => {
+                text.parse()
+                    .map(ScalarValue::Integer)
+                    .map_err(|error: std::num::ParseIntError| {
+                        DecodeError::ScalarParse(error.to_string())
+                    })
+            }
+            LeafCodec::Float => {
+                text.parse()
+                    .map(ScalarValue::Float)
+                    .map_err(|error: std::num::ParseFloatError| {
+                        DecodeError::ScalarParse(error.to_string())
+                    })
+            }
+            LeafCodec::Text => Ok(ScalarValue::Text(text.to_owned())),
+            LeafCodec::Boolean => match text {
+                "true" => Ok(ScalarValue::Boolean(true)),
+                "false" => Ok(ScalarValue::Boolean(false)),
+                other => Err(DecodeError::ScalarParse(format!(
                     "not a boolean keyword: {other}"
                 ))),
-                None => Err(DecodeError::LeafNotFlattenable),
             },
-            LeafCodec::PipeText => match block {
-                Block::PipeText(text) => Ok(ScalarValue::Text(text.text().to_owned())),
-                _ => Err(DecodeError::BlockKindMismatch {
-                    expected: "pipe text",
-                    found: Self::block_kind(block),
-                }),
-            },
+            LeafCodec::PipeText => unreachable!("pipe text returned before bare leaf parsing"),
             LeafCodec::Foreign(_) => Err(DecodeError::LeafNotFlattenable),
         }
     }
 
-    fn boundary_children<'block>(
-        &self,
-        boundary: raw_discovery::TriggerIdentifier,
-        block: &'block Block,
-    ) -> Result<&'block [Block], DecodeError> {
-        let definition = self.profile.definition(boundary)?;
-        let Trigger::Boundary { opening, closing } = &definition.trigger else {
-            return Err(DecodeError::BoundaryMismatch { boundary });
-        };
-        let Block::Delimited {
-            delimiter,
-            root_objects,
-        } = block
-        else {
-            return Err(DecodeError::BlockKindMismatch {
-                expected: "profile boundary",
-                found: Self::block_kind(block),
-            });
-        };
-        if delimiter.opening_text() != opening || delimiter.closing_text() != closing {
-            return Err(DecodeError::BoundaryMismatch { boundary });
-        }
-        Ok(root_objects)
-    }
-
-    pub fn encode<Resolver: NameResolver + ?Sized>(
+    /// Render directly from descriptor data under explicit table-owned context
+    /// policy. No raw `Block` renderer participates in textual output.
+    pub fn encode_text<Resolver: NameResolver + ?Sized>(
         &self,
         expected: ScopedEncodedTypeId,
         value: &StructuralValue,
         resolver: &Resolver,
-    ) -> Result<Block, EncodeError> {
+    ) -> Result<String, EncodeError> {
         let entry = self
             .table
             .entry(expected)
@@ -366,6 +622,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             &collector.fields,
             value.fields(),
             resolver,
+            self.table.block_discovery().root_context(),
         )
     }
 
@@ -375,14 +632,15 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
         mirror: &RoleKeyedMirror,
         resolver: &Resolver,
-    ) -> Result<Block, EncodeError> {
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError> {
         let descriptor = descriptors
             .get(&role)
             .ok_or(EncodeError::MissingRole { role })?;
         let value = mirror
             .value_by_stable_role(role)
             .ok_or(EncodeError::MissingRole { role })?;
-        self.encode_descriptor(descriptor, value, descriptors, mirror, resolver)
+        self.encode_descriptor(descriptor, value, descriptors, mirror, resolver, context)
     }
 
     fn encode_descriptor<Resolver: NameResolver + ?Sized>(
@@ -392,74 +650,94 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
         mirror: &RoleKeyedMirror,
         resolver: &Resolver,
-    ) -> Result<Block, EncodeError> {
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError> {
         match (descriptor, value) {
-            (SharedDescriptor::Atom(_), FieldValue::Atom(identifier)) => Ok(Block::Atom(
-                Atom::new(resolver.resolve(*identifier)?.as_str()),
-            )),
+            (SharedDescriptor::Atom(_), FieldValue::Atom(identifier)) => {
+                Ok(resolver.resolve(*identifier)?.as_str().to_owned())
+            }
             (SharedDescriptor::Literal(expected), FieldValue::Atom(identifier))
                 if expected == identifier =>
             {
-                Ok(Block::Atom(Atom::new(
-                    resolver.resolve(*identifier)?.as_str(),
-                )))
+                Ok(resolver.resolve(*identifier)?.as_str().to_owned())
             }
             (SharedDescriptor::Literal(_), FieldValue::Atom(_)) => {
                 Err(EncodeError::LiteralMismatch)
             }
-            (SharedDescriptor::Leaf(_), FieldValue::Scalar(value)) => Ok(value.render_block()),
+            (SharedDescriptor::Leaf(codec), FieldValue::Scalar(value)) => {
+                self.encode_leaf(codec, value, context)
+            }
             (SharedDescriptor::Delegate { target, payload }, FieldValue::Delegated(value)) => {
-                let block = self.encode(*target, value, resolver)?;
+                let text = self.encode_text(*target, value, resolver)?;
                 if let Some(payload) = payload {
-                    let atom = block
-                        .atom()
-                        .ok_or(EncodeError::DelegationPayloadMismatch { payload: *payload })?;
-                    if !payload.accepts(atom) {
+                    let atom = Atom::new(&text);
+                    if text.contains('.') || !payload.accepts(&atom) {
                         return Err(EncodeError::DelegationPayloadMismatch { payload: *payload });
                     }
                 }
-                Ok(block)
+                Ok(text)
             }
             (
-                SharedDescriptor::Application { head, payload, .. },
+                SharedDescriptor::Application {
+                    operator,
+                    head,
+                    payload,
+                },
                 FieldValue::Application { .. },
-            ) => Ok(Block::Application {
-                head: Box::new(self.encode_role(*head, descriptors, mirror, resolver)?),
-                payload: Box::new(self.encode_role(*payload, descriptors, mirror, resolver)?),
-            }),
+            ) => Ok(format!(
+                "{}{}{}",
+                self.encode_role(*head, descriptors, mirror, resolver, context)?,
+                self.operator_text_encode(*operator)?,
+                self.encode_role(*payload, descriptors, mirror, resolver, context)?,
+            )),
             (
                 SharedDescriptor::Delimited { boundary, content }
                 | SharedDescriptor::ItemBoundary { boundary, content },
                 FieldValue::Delimited(_),
             ) => {
+                let active = self
+                    .table
+                    .block_discovery()
+                    .active_triggers(context)
+                    .map_err(|_| EncodeError::NonCanonicalSpelling)?;
+                if !active.triggers().contains(boundary) {
+                    return Err(EncodeError::NonCanonicalSpelling);
+                }
+                let child_context = self
+                    .table
+                    .block_discovery()
+                    .child_context(context, *boundary)
+                    .map_err(|_| EncodeError::NonCanonicalSpelling)?;
                 let Trigger::Boundary { opening, closing } =
                     &self.profile.definition(*boundary)?.trigger
                 else {
                     return Err(EncodeError::ShapeMismatch);
                 };
-                let delimiter =
-                    Self::delimiter_for(opening, closing).ok_or(EncodeError::ShapeMismatch)?;
-                Ok(Block::Delimited {
-                    delimiter,
-                    root_objects: self.encode_children_role(
+                Ok(format!(
+                    "{}{}{}",
+                    opening,
+                    self.encode_repeated_role(
                         *content,
                         descriptors,
                         mirror,
                         resolver,
+                        child_context
                     )?,
-                })
+                    closing,
+                ))
             }
             _ => Err(EncodeError::ShapeMismatch),
         }
     }
 
-    fn encode_children_role<Resolver: NameResolver + ?Sized>(
+    fn encode_repeated_role<Resolver: NameResolver + ?Sized>(
         &self,
         role: StableRoleId,
         descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
         mirror: &RoleKeyedMirror,
         resolver: &Resolver,
-    ) -> Result<Vec<Block>, EncodeError> {
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError> {
         let SharedDescriptor::Repeated { element, .. } = descriptors
             .get(&role)
             .ok_or(EncodeError::MissingRole { role })?
@@ -472,67 +750,98 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         else {
             return Err(EncodeError::ShapeMismatch);
         };
-        values
+        let rendered = values
             .iter()
-            .map(|value| self.encode_descriptor(element, value, descriptors, mirror, resolver))
-            .collect()
+            .map(|value| {
+                self.encode_descriptor(element, value, descriptors, mirror, resolver, context)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if rendered.len() < 2 {
+            return Ok(rendered.concat());
+        }
+        let policy = self
+            .table
+            .textual_rendering()
+            .for_context(context)
+            .ok_or(EncodeError::NonCanonicalSpelling)?;
+        let separator = policy
+            .separator()
+            .ok_or(EncodeError::NonCanonicalSpelling)?;
+        let Trigger::Whitespace { canonical_spelling } =
+            &self.profile.definition(separator)?.trigger
+        else {
+            return Err(EncodeError::NonCanonicalSpelling);
+        };
+        Ok(rendered.join(canonical_spelling))
     }
 
-    fn delimiter_for(opening: &str, closing: &str) -> Option<Delimiter> {
-        [
-            Delimiter::Parenthesis,
-            Delimiter::SquareBracket,
-            Delimiter::Brace,
-        ]
-        .into_iter()
-        .find(|delimiter| {
-            delimiter.opening_text() == opening && delimiter.closing_text() == closing
-        })
-    }
-
-    fn block_kind(block: &Block) -> &'static str {
-        match block {
-            Block::Atom(_) => "atom",
-            Block::Application { .. } => "application",
-            Block::Delimited { .. } => "delimited",
-            Block::PipeText(_) => "pipe text",
+    fn encode_leaf(
+        &self,
+        codec: &LeafCodec,
+        value: &ScalarValue,
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError> {
+        match (codec, value) {
+            (LeafCodec::Integer, ScalarValue::Integer(value)) => Ok(value.to_string()),
+            (LeafCodec::Float, ScalarValue::Float(value)) => Ok(value.to_string()),
+            (LeafCodec::Boolean, ScalarValue::Boolean(value)) => Ok(value.to_string()),
+            (LeafCodec::Text, ScalarValue::Text(value)) if Self::bare_dotted(value) => {
+                Ok(value.clone())
+            }
+            (LeafCodec::Text | LeafCodec::PipeText, ScalarValue::Text(value)) => {
+                self.encode_carrier(value, context)
+            }
+            _ => Err(EncodeError::ShapeMismatch),
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use name_table::{IdentifierNamespace, Name};
-
-    use super::*;
-
-    #[test]
-    fn literal_without_lexicon_is_not_collapsed_into_alternative_failure() {
-        let table = crate::fixture::FixtureBuilder::new()
-            .build()
-            .expect("fixture table seals");
-        let profile = crate::fixture::FixtureBuilder::token_profile();
-        let evaluator = StructuralEvaluator::with_profile(&table, &profile)
-            .expect("the profile is pinned to the table");
-        let mut literal_names = NameTable::new(IdentifierNamespace::Fixture);
-        let literal = literal_names
-            .intern(Name::new("reserved"))
-            .expect("literal allocation");
-        let mut decode_names = NameTable::new(IdentifierNamespace::Fixture);
-        let mut state = DecodeState {
-            fields: RoleKeyedMirror::default(),
-            roles: BTreeMap::new(),
+    fn encode_carrier(
+        &self,
+        body: &str,
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError> {
+        let policy = self
+            .table
+            .textual_rendering()
+            .for_context(context)
+            .ok_or(EncodeError::NonCanonicalSpelling)?;
+        let carrier = policy.carrier().ok_or(EncodeError::NonCanonicalSpelling)?;
+        let Trigger::Carrier {
+            opening,
+            closing,
+            escape,
+        } = &self.profile.definition(carrier)?.trigger
+        else {
+            return Err(EncodeError::NonCanonicalSpelling);
         };
+        let body = escape.as_ref().map_or_else(
+            || body.to_owned(),
+            |escape| body.replace(closing, &format!("{escape}{closing}")),
+        );
+        Ok(format!("{opening}{body}{closing}"))
+    }
 
-        assert!(matches!(
-            evaluator.decode_descriptor(
-                &SharedDescriptor::Literal(literal),
-                &Block::Atom(Atom::new("reserved")),
-                &mut state,
-                &mut decode_names,
-                &[],
-            ),
-            Err(DecodeError::MissingLexicon)
-        ));
+    fn bare_dotted(value: &str) -> bool {
+        !value.is_empty()
+            && value
+                .split('.')
+                .all(|part| Atom::new(part).qualifies_as_symbol())
+    }
+
+    fn operator_text(&self, identifier: TriggerIdentifier) -> Result<String, DecodeError> {
+        match &self.profile.definition(identifier)?.trigger {
+            Trigger::Application { glyph } | Trigger::Punctuation { glyph } => Ok(glyph.clone()),
+            _ => Err(DecodeError::BlockKindMismatch {
+                expected: "application trigger",
+                found: "profile trigger",
+            }),
+        }
+    }
+
+    fn operator_text_encode(&self, identifier: TriggerIdentifier) -> Result<&str, EncodeError> {
+        match &self.profile.definition(identifier)?.trigger {
+            Trigger::Application { glyph } | Trigger::Punctuation { glyph } => Ok(glyph),
+            _ => Err(EncodeError::ShapeMismatch),
+        }
     }
 }

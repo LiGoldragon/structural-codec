@@ -2,7 +2,10 @@
 
 use content_identity::ArchiveError;
 use name_table::NameTableError;
-use raw_discovery::{BlockDiscoveryError, RecognizeError, TokenProfileError, TriggerIdentifier};
+use raw_discovery::{
+    BlockDiscoveryError, BoundaryDiscoveryContextIdentifier, RecognizeError, TokenProfileError,
+    TriggerIdentifier,
+};
 
 use crate::form::DelegationPayload;
 use crate::ids::{EncodedConstructorId, ScopedEncodedTypeId, StableRoleId};
@@ -204,6 +207,21 @@ pub enum TableError {
         "boundary {boundary:?} is used by a structural form but absent from the table discovery rules"
     )]
     UnconfiguredDiscoveryBoundary { boundary: TriggerIdentifier },
+    #[error("textual rendering policy does not name exactly the table discovery contexts")]
+    TextualPolicyContextMismatch,
+    #[error("textual policy trigger {identifier:?} is inactive in context {context:?}")]
+    InactiveTextualPolicyTrigger {
+        context: BoundaryDiscoveryContextIdentifier,
+        identifier: TriggerIdentifier,
+    },
+    #[error(
+        "textual policy trigger {identifier:?} is not a {required} trigger in context {context:?}"
+    )]
+    WrongTextualPolicyTrigger {
+        context: BoundaryDiscoveryContextIdentifier,
+        identifier: TriggerIdentifier,
+        required: &'static str,
+    },
     #[error(transparent)]
     BlockDiscovery(#[from] BlockDiscoveryError),
     #[error(transparent)]

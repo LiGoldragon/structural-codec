@@ -8,10 +8,12 @@ traversal.
 
 The table stores a language dimension, a typed target-layout content identity,
 the exact `ContentHash<TokenProfileDomain>`, canonical block-discovery rules,
-and a vocabulary identity. Sealing binds the rules to the exact profile and the
-table owns both runtime values. Textual decode discovers source-bounded blocks
-before expectation-driven evaluation; Textual encode writes profile spellings
-directly from the typed descriptors. Fixture vocabularies use a separate
+an explicit per-context textual rendering policy, and a vocabulary identity.
+Sealing binds the rules and policy to the exact profile and the table owns the
+runtime values. Textual decode discovers source-bounded blocks before one
+expectation-driven bounded-cursor traversal; Textual encode follows the same
+descriptor/context path and writes only explicit policy-selected profile
+spellings. Fixture vocabularies use a separate
 identity domain and reserved Schema ids, so they cannot compose with production
 Schema sidecars.
 

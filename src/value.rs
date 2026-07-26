@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 
 use content_identity::{ArchiveError, ContentHash, DomainSeparation, HashDomain, LayoutVersion};
 use name_table::Identifier;
-use raw_discovery::{Atom, Block, PipeText};
 
 use crate::error::AuthoringError;
 use crate::ids::{EncodedConstructorId, FieldRole, StableRoleId};
@@ -128,38 +127,6 @@ pub enum ScalarValue {
     Float(f64),
     Text(String),
     Boolean(bool),
-}
-
-impl ScalarValue {
-    pub(crate) fn render_block(&self) -> Block {
-        match self {
-            Self::Integer(value) => Self::render_dotted(&value.to_string()),
-            Self::Float(value) => Self::render_dotted(&value.to_string()),
-            Self::Boolean(value) => Self::render_dotted(&value.to_string()),
-            Self::Text(value) if Self::bare_dotted(value) => Self::render_dotted(value),
-            Self::Text(value) => Block::PipeText(PipeText::new(value)),
-        }
-    }
-
-    fn bare_dotted(value: &str) -> bool {
-        !value.is_empty()
-            && value
-                .split('.')
-                .all(|part| Atom::new(part).qualifies_as_symbol())
-    }
-
-    fn render_dotted(text: &str) -> Block {
-        let segments: Vec<&str> = text.split('.').collect();
-        let (last, rest) = segments.split_last().expect("non-empty text");
-        let mut block = Block::Atom(Atom::new(*last));
-        for segment in rest.iter().rev() {
-            block = Block::Application {
-                head: Box::new(Block::Atom(Atom::new(*segment))),
-                payload: Box::new(block),
-            };
-        }
-        block
-    }
 }
 
 /// Layout two is required because the archived mirror changed from an unkeyed

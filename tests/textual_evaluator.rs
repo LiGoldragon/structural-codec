@@ -102,7 +102,7 @@ fn carrier_text_is_opaque_to_boundary_discovery_and_round_trips_directly() {
 }
 
 #[test]
-fn low_level_evaluator_returns_profile_mismatch_instead_of_panicking() {
+fn supplied_profile_mismatch_is_refused_before_textual_evaluation() {
     let mouth = ProfileBoundTextual {
         table: FixtureBuilder::new().build().expect("table"),
     };

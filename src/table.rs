@@ -18,7 +18,8 @@
 //!     AcceptedDecodeForm, AddressedStructuralTable, ConstructorCodec, DecodeFormId,
 //!     EncodedConstructorId, EncodedLanguage, LeafCodec, ScopedEncodedTypeId,
 //!     SharedDescriptor, StructuralEntry, StructuralRule, StructuralVocabularyIdentity,
-//!     TableIdentityPayload, TargetLayoutIdentity, UnaryRule,
+//!     ContextualTextualPolicy, TableIdentityPayload, TargetLayoutIdentity,
+//!     TextualRenderingPolicy, UnaryRule,
 //! };
 //!
 //! let profile = RawProfile::standard().seal()?;
@@ -51,6 +52,11 @@
 //!         ),
 //!         vec![],
 //!     ),
+//!     TextualRenderingPolicy::new(vec![ContextualTextualPolicy::new(
+//!         BoundaryDiscoveryContextIdentifier::new(1),
+//!         None,
+//!         None,
+//!     )]),
 //!     BTreeMap::from([(type_id, entry)]),
 //! );
 //! let table = AddressedStructuralTable::seal(payload, &profile)?;
@@ -62,8 +68,9 @@ use std::collections::BTreeMap;
 
 use content_identity::{ArchiveError, ContentHash, DomainSeparation, HashDomain, LayoutVersion};
 use raw_discovery::{
-    BlockTreeDiscoveryConfiguration, SealedBlockTreeDiscoveryConfiguration, SealedTokenProfile,
-    TokenProfileDomain, Trigger, TriggerIdentifier,
+    BlockTreeDiscoveryConfiguration, BoundaryDiscoveryContextIdentifier,
+    SealedBlockTreeDiscoveryConfiguration, SealedTokenProfile, TokenProfileDomain, Trigger,
+    TriggerIdentifier,
 };
 
 use crate::codec::StructuralEntry;
@@ -125,6 +132,71 @@ pub enum StructuralVocabularyIdentity {
     Fixture(ContentHash<FixtureVocabularyDomain>),
 }
 
+/// Canonical source spellings selected explicitly for one discovery context.
+///
+/// Trigger-set order has no rendering meaning. A form that needs a separator
+/// or text carrier must name it here, and sealing proves it is active in this
+/// exact recursive context.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct ContextualTextualPolicy {
+    context: BoundaryDiscoveryContextIdentifier,
+    separator: Option<TriggerIdentifier>,
+    carrier: Option<TriggerIdentifier>,
+}
+
+impl ContextualTextualPolicy {
+    pub const fn new(
+        context: BoundaryDiscoveryContextIdentifier,
+        separator: Option<TriggerIdentifier>,
+        carrier: Option<TriggerIdentifier>,
+    ) -> Self {
+        Self {
+            context,
+            separator,
+            carrier,
+        }
+    }
+
+    pub const fn context(&self) -> BoundaryDiscoveryContextIdentifier {
+        self.context
+    }
+
+    pub const fn separator(&self) -> Option<TriggerIdentifier> {
+        self.separator
+    }
+
+    pub const fn carrier(&self) -> Option<TriggerIdentifier> {
+        self.carrier
+    }
+}
+
+/// Identity-bearing canonical textual output policy for every source context.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct TextualRenderingPolicy {
+    contexts: Vec<ContextualTextualPolicy>,
+}
+
+impl TextualRenderingPolicy {
+    pub fn new(mut contexts: Vec<ContextualTextualPolicy>) -> Self {
+        contexts.sort_unstable_by_key(ContextualTextualPolicy::context);
+        Self { contexts }
+    }
+
+    pub fn for_context(
+        &self,
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Option<&ContextualTextualPolicy> {
+        self.contexts
+            .binary_search_by_key(&context, ContextualTextualPolicy::context)
+            .ok()
+            .map(|index| &self.contexts[index])
+    }
+
+    fn contexts(&self) -> &[ContextualTextualPolicy] {
+        &self.contexts
+    }
+}
+
 impl StructuralVocabularyIdentity {
     /// Derive a production vocabulary identity from its canonical archived
     /// vocabulary bytes.
@@ -149,6 +221,7 @@ pub struct TableIdentityPayload<Record = StructuralRule> {
     token_profile_identity: ContentHash<TokenProfileDomain>,
     vocabulary_identity: StructuralVocabularyIdentity,
     block_discovery: BlockTreeDiscoveryConfiguration,
+    textual_rendering: TextualRenderingPolicy,
     entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
 }
 
@@ -162,6 +235,7 @@ impl<Record> TableIdentityPayload<Record> {
         token_profile_identity: ContentHash<TokenProfileDomain>,
         vocabulary_identity: StructuralVocabularyIdentity,
         block_discovery: BlockTreeDiscoveryConfiguration,
+        textual_rendering: TextualRenderingPolicy,
         entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
     ) -> Self {
         Self {
@@ -170,6 +244,7 @@ impl<Record> TableIdentityPayload<Record> {
             token_profile_identity,
             vocabulary_identity,
             block_discovery,
+            textual_rendering,
             entries,
         }
     }
@@ -267,18 +342,9 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
         &self.block_discovery
     }
 
-    pub(crate) fn discovery_trigger_identifiers(&self) -> Vec<TriggerIdentifier> {
-        let mut identifiers = self
-            .payload
-            .block_discovery
-            .boundaries()
-            .contexts()
-            .iter()
-            .flat_map(|context| context.triggers().triggers().iter().copied())
-            .collect::<Vec<_>>();
-        identifiers.sort_unstable();
-        identifiers.dedup();
-        identifiers
+    /// The identity-bearing canonical source rendering policy.
+    pub fn textual_rendering(&self) -> &TextualRenderingPolicy {
+        &self.payload.textual_rendering
     }
     pub fn vocabulary_identity(&self) -> StructuralVocabularyIdentity {
         self.payload.vocabulary_identity
@@ -306,6 +372,11 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
                 });
             }
         }
+        Self::validate_textual_rendering(
+            &payload.textual_rendering,
+            profile,
+            &payload.block_discovery,
+        )?;
         for (type_id, entry) in &payload.entries {
             if entry.encoded_type() != *type_id {
                 return Err(TableError::EntryKeyMismatch {
@@ -343,6 +414,64 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
                 Self::validate_rule(codec.encode_form(), profile, &payload.block_discovery)?;
             }
             entry.validate_disjoint_with(&payload.entries)?;
+        }
+        Ok(())
+    }
+
+    fn validate_textual_rendering(
+        policy: &TextualRenderingPolicy,
+        profile: &SealedTokenProfile,
+        block_discovery: &BlockTreeDiscoveryConfiguration,
+    ) -> Result<(), TableError> {
+        let contexts = block_discovery.boundaries().contexts();
+        if policy.contexts().len() != contexts.len()
+            || !policy
+                .contexts()
+                .iter()
+                .zip(contexts)
+                .all(|(policy, context)| policy.context() == context.identifier())
+        {
+            return Err(TableError::TextualPolicyContextMismatch);
+        }
+        for policy in policy.contexts() {
+            let active = contexts
+                .iter()
+                .find(|context| context.identifier() == policy.context())
+                .expect("the exact context set was checked above")
+                .triggers()
+                .triggers();
+            for (identifier, required) in [
+                (policy.separator(), "whitespace"),
+                (policy.carrier(), "carrier"),
+            ] {
+                let Some(identifier) = identifier else {
+                    continue;
+                };
+                if !active.contains(&identifier) {
+                    return Err(TableError::InactiveTextualPolicyTrigger {
+                        context: policy.context(),
+                        identifier,
+                    });
+                }
+                let valid = match required {
+                    "whitespace" => matches!(
+                        profile.definition(identifier)?.trigger,
+                        Trigger::Whitespace { .. }
+                    ),
+                    "carrier" => matches!(
+                        profile.definition(identifier)?.trigger,
+                        Trigger::Carrier { .. }
+                    ),
+                    _ => unreachable!("fixed policy trigger kinds"),
+                };
+                if !valid {
+                    return Err(TableError::WrongTextualPolicyTrigger {
+                        context: policy.context(),
+                        identifier,
+                        required,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -510,6 +639,7 @@ mod tests {
             profile.identity(),
             StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
             crate::fixture::FixtureBuilder::block_discovery(),
+            crate::fixture::FixtureBuilder::textual_rendering(),
             BTreeMap::from([(logos_entry().encoded_type(), logos_entry())]),
         );
         assert!(matches!(
@@ -526,6 +656,7 @@ mod tests {
             other_profile.identity(),
             StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
             crate::fixture::FixtureBuilder::block_discovery(),
+            crate::fixture::FixtureBuilder::textual_rendering(),
             BTreeMap::new(),
         );
         assert!(matches!(

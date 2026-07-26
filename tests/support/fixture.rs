@@ -20,8 +20,8 @@ use crate::form::{
 };
 use crate::ids::{DecodeFormId, EncodedConstructorId, ScopedEncodedTypeId};
 use crate::table::{
-    AddressedStructuralTable, StructuralVocabularyIdentity, TableIdentityPayload,
-    TargetLayoutIdentity,
+    AddressedStructuralTable, ContextualTextualPolicy, StructuralVocabularyIdentity,
+    TableIdentityPayload, TargetLayoutIdentity, TextualRenderingPolicy,
 };
 
 pub const INTEGER: ScopedEncodedTypeId = ScopedEncodedTypeId::fixture_schema(0xf010);
@@ -37,6 +37,7 @@ pub const PARENTHESIS_BOUNDARY: TriggerIdentifier = TriggerIdentifier::new(0);
 pub const SQUARE_BOUNDARY: TriggerIdentifier = TriggerIdentifier::new(1);
 pub const BRACE_BOUNDARY: TriggerIdentifier = TriggerIdentifier::new(2);
 pub const APPLICATION_OPERATOR: TriggerIdentifier = TriggerIdentifier::new(3);
+pub const PIPE_CARRIER: TriggerIdentifier = TriggerIdentifier::new(4);
 pub const WHITESPACE_TRIVIA: TriggerIdentifier = TriggerIdentifier::new(5);
 pub const COMMENT_TRIVIA: TriggerIdentifier = TriggerIdentifier::new(6);
 
@@ -109,6 +110,14 @@ impl FixtureBuilder {
         )
     }
 
+    pub fn textual_rendering() -> TextualRenderingPolicy {
+        TextualRenderingPolicy::new(vec![ContextualTextualPolicy::new(
+            BoundaryDiscoveryContextIdentifier::new(1),
+            Some(WHITESPACE_TRIVIA),
+            Some(PIPE_CARRIER),
+        )])
+    }
+
     pub fn build(&self) -> Result<AddressedStructuralTable, TableError> {
         let profile = Self::token_profile();
         let entries = self
@@ -125,6 +134,7 @@ impl FixtureBuilder {
                     b"structural-codec fixture typed vocabulary R3/R4",
                 ),
                 Self::block_discovery(),
+                Self::textual_rendering(),
                 entries,
             ),
             &profile,

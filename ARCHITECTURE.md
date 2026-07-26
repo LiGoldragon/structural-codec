@@ -40,7 +40,10 @@ reserved Schema range, preventing accidental composition with production
 sidecars.
 
 `StructuralTableDomain` moves from layout 7 to layout 8 because the archived
-identity payload now includes the canonical pass-one discovery configuration.
+identity payload now includes the canonical pass-one discovery configuration
+and the explicit per-context textual rendering policy. That policy selects a
+canonical whitespace separator and carrier trigger without assigning meaning to
+trigger-set order.
 `StructuralValueDomain` remains at layout 2: the archived value stays
 constructor-tagged and role-keyed.
 
@@ -51,10 +54,20 @@ not duplicate `raw-discovery::Delimiter` in a table preimage. A sealed table
 owns the exact sealed token profile and its canonical, archiveable
 block-discovery configuration. It validates both together while sealing and
 includes the rules in the table identity payload. Text first creates a complete
-source-bounded `DiscoveredBlockTree` from those table-owned rules. The same
-shared evaluator then interprets each expected descriptor against only its
-bounded source and the already-discovered children. Direct `Block` evaluation
-remains a separate low-level compatibility surface.
+source-bounded `DiscoveredBlockTree` from those table-owned rules. The one
+shared evaluator then interprets every expected descriptor against a sequential
+bounded cursor: source extent, next discovered child index, and the exact active
+discovery context. Products advance field-by-field, repetition advances
+element-by-element, applications consume their expected operator at the current
+cursor, and delimited/item boundaries enter an already-discovered child. It
+never splits an interior, performs a global trigger scan, or reconstructs a raw
+`Block`/`Document`; raw-`Block` evaluator methods are retired.
+
+Each opened boundary derives its interior context from the sealed transition
+data. Only that context's carriers and trivia are consulted. Textual encoding
+follows the same descriptor/context path and uses the table's explicit policy
+for separators and carriers. Missing or invalid policy is refused rather than
+being resolved by ASCII space, trigger order, or a global default.
 
 The evaluator result is `StructuralValue { constructor, fields }`, where
 `fields` is a `RoleKeyedMirror`. A manual `Textual::reflect` starts a checked

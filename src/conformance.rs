@@ -9,7 +9,7 @@
 //! frozen; this crate does not revive a derive path.
 
 use name_table::{IdentifierNamespace, NameResolver, NameTable, NameTableError};
-use raw_discovery::{Block, SealedTokenProfile};
+use raw_discovery::SealedTokenProfile;
 
 use crate::error::{DecodeError, EncodeError};
 use crate::evaluator::StructuralEvaluator;
@@ -23,8 +23,8 @@ use crate::value::StructuralValue;
 pub trait GeneratedCodec: Sized {
     const CORE_TYPE: ScopedEncodedTypeId;
 
-    fn decode(block: &Block, names: &mut NameTable) -> Result<Self, DecodeError>;
-    fn encode<Resolver: NameResolver>(&self, resolver: &Resolver) -> Result<Block, EncodeError>;
+    fn decode(source: &str, names: &mut NameTable) -> Result<Self, DecodeError>;
+    fn encode<Resolver: NameResolver>(&self, resolver: &Resolver) -> Result<String, EncodeError>;
     fn to_structural(&self) -> StructuralValue;
 }
 
@@ -67,15 +67,15 @@ impl<'table, Record: StructureRecord> ConformanceHarness<'table, Record> {
     }
 
     /// Assert the generated codec `T` agrees with the evaluator on every fixture.
-    pub fn check<T: GeneratedCodec>(&self, fixtures: &[Block]) -> Result<(), ConformanceError> {
-        for block in fixtures {
+    pub fn check<T: GeneratedCodec>(&self, fixtures: &[String]) -> Result<(), ConformanceError> {
+        for source in fixtures {
             let mut names_generated = NameTable::new(IdentifierNamespace::Fixture);
-            let generated = T::decode(block, &mut names_generated);
+            let generated = T::decode(source, &mut names_generated);
 
             let mut names_interpreted = NameTable::new(IdentifierNamespace::Fixture);
-            let interpreted = self
-                .evaluator
-                .decode(self.expected, block, &mut names_interpreted);
+            let interpreted =
+                self.evaluator
+                    .decode_text(self.expected, source, &mut names_interpreted);
 
             match (generated, interpreted) {
                 (Ok(typed), Ok(mirror)) => {
@@ -87,11 +87,11 @@ impl<'table, Record: StructureRecord> ConformanceHarness<'table, Record> {
                     {
                         return Err(ConformanceError::NameTableDelta);
                     }
-                    let generated_block = typed.encode(&names_generated)?;
-                    let interpreted_block =
+                    let generated_text = typed.encode(&names_generated)?;
+                    let interpreted_text =
                         self.evaluator
-                            .encode(self.expected, &mirror, &names_interpreted)?;
-                    if generated_block != interpreted_block {
+                            .encode_text(self.expected, &mirror, &names_interpreted)?;
+                    if generated_text != interpreted_text {
                         return Err(ConformanceError::CanonicalOutput);
                     }
                 }
