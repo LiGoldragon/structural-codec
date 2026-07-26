@@ -602,6 +602,24 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         value: &StructuralValue,
         resolver: &Resolver,
     ) -> Result<String, EncodeError> {
+        self.encode_type_at_context(
+            expected,
+            value,
+            resolver,
+            self.table.block_discovery().root_context(),
+        )
+    }
+
+    /// The internal encoder carries the current recursive discovery context.
+    /// Only the public entry point selects root; recursive descriptor arms
+    /// retain or transition this context explicitly.
+    fn encode_type_at_context<Resolver: NameResolver + ?Sized>(
+        &self,
+        expected: ScopedEncodedTypeId,
+        value: &StructuralValue,
+        resolver: &Resolver,
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError> {
         let entry = self
             .table
             .entry(expected)
@@ -622,7 +640,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             &collector.fields,
             value.fields(),
             resolver,
-            self.table.block_discovery().root_context(),
+            context,
         )
     }
 
@@ -668,7 +686,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                 self.encode_leaf(codec, value, context)
             }
             (SharedDescriptor::Delegate { target, payload }, FieldValue::Delegated(value)) => {
-                let text = self.encode_text(*target, value, resolver)?;
+                let text = self.encode_type_at_context(*target, value, resolver, context)?;
                 if let Some(payload) = payload {
                     let atom = Atom::new(&text);
                     if text.contains('.') || !payload.accepts(&atom) {

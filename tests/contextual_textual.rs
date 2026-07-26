@@ -20,6 +20,7 @@ use crate::{
 };
 
 const VALUE: ScopedEncodedTypeId = ScopedEncodedTypeId::schema(0x9610);
+const TEXT: ScopedEncodedTypeId = ScopedEncodedTypeId::schema(0x9611);
 const OUTER: TriggerIdentifier = TriggerIdentifier::new(20);
 const DOT: TriggerIdentifier = TriggerIdentifier::new(21);
 const ROOT_CARRIER_A: TriggerIdentifier = TriggerIdentifier::new(22);
@@ -183,7 +184,10 @@ impl ItemRule {
             values: Position::try_new(SharedDescriptor::Repeated {
                 minimum: 1,
                 maximum: None,
-                element: Box::new(SharedDescriptor::Leaf(LeafCodec::Text)),
+                element: Box::new(SharedDescriptor::Delegate {
+                    target: TEXT,
+                    payload: None,
+                }),
             })
             .expect("typed repeated values"),
         }
@@ -202,7 +206,8 @@ impl StructureRecord for ItemRule {
     }
 }
 
-type Rules = RuleCoproduct<ProductRule, ItemRule>;
+type CustomRules = RuleCoproduct<ProductRule, ItemRule>;
+type Rules = RuleCoproduct<CustomRules, crate::StructuralRule>;
 
 fn profile() -> raw_discovery::SealedTokenProfile {
     TokenProfileData::new(
@@ -309,9 +314,12 @@ fn discovery(reverse_root_carriers: bool) -> BlockTreeDiscoveryConfiguration {
 
 fn table(reverse_root_carriers: bool) -> AddressedStructuralTable<Rules> {
     let profile = profile();
-    let product = Rules::Left(ProductRule::new());
-    let item = Rules::Right(ItemRule::new());
-    let entry = StructuralEntry::new(
+    let product = Rules::Left(CustomRules::Left(ProductRule::new()));
+    let item = Rules::Left(CustomRules::Right(ItemRule::new()));
+    let text_rule = Rules::Right(crate::StructuralRule::Unary(
+        crate::UnaryRule::new(SharedDescriptor::Leaf(LeafCodec::Text)).expect("text rule"),
+    ));
+    let value_entry = StructuralEntry::new(
         VALUE,
         vec![
             ConstructorCodec::new(
@@ -329,6 +337,17 @@ fn table(reverse_root_carriers: bool) -> AddressedStructuralTable<Rules> {
             ),
         ],
     );
+    let text_entry = StructuralEntry::new(
+        TEXT,
+        vec![ConstructorCodec::new(
+            EncodedConstructorId::under(TEXT, 1),
+            vec![AcceptedDecodeForm::new(
+                DecodeFormId::new(3),
+                text_rule.clone(),
+            )],
+            text_rule,
+        )],
+    );
     AddressedStructuralTable::seal(
         TableIdentityPayload::new(
             EncodedLanguage::Schema,
@@ -340,7 +359,7 @@ fn table(reverse_root_carriers: bool) -> AddressedStructuralTable<Rules> {
                 ContextualTextualPolicy::new(ROOT, Some(ROOT_WHITESPACE), Some(ROOT_CARRIER_B)),
                 ContextualTextualPolicy::new(CHILD, Some(CHILD_WHITESPACE), Some(CHILD_CARRIER)),
             ]),
-            BTreeMap::from([(VALUE, entry)]),
+            BTreeMap::from([(VALUE, value_entry), (TEXT, text_entry)]),
         ),
         &profile,
     )
@@ -380,6 +399,16 @@ fn source_cursor_uses_context_local_carriers_trivia_and_explicit_rendering_polic
             .expect("canonical child list"),
         "{[|a b|]\n[|c d|]}"
     );
+    let reparsed = evaluator
+        .decode_text(
+            VALUE,
+            &evaluator
+                .encode_text(VALUE, &child, &names)
+                .expect("canonical child text"),
+            &mut names,
+        )
+        .expect("canonical child reparse");
+    assert_eq!(reparsed, child);
 
     // Root trivia is not silently admitted in the child context: it becomes
     // a text item rather than being discarded.
