@@ -45,6 +45,11 @@ pub mod ids;
 pub mod table;
 mod text;
 pub mod textual_form;
+/// Disposable Slice 0 witness for a second, fully typed structural vocabulary.
+///
+/// This module is deliberately a proposed extension, not a production API.
+/// It exists only in the isolated spike workspace and is removed with it.
+pub mod typed_rust_spike;
 pub mod value;
 
 pub use codec::{ConstructorCodec, StructuralEntry};
