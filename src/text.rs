@@ -452,8 +452,21 @@ impl StructuralEvaluator<'_> {
             StructuralForm::Atom(atom) => {
                 self.preflight_terminal(reading, &position_triggers, atom.trigger)
             }
-            StructuralForm::Literal(_) => {
-                self.preflight_terminal(reading, &position_triggers, None)
+            StructuralForm::Literal(identifier) => {
+                let region = self.preflight_terminal(reading, &position_triggers, None)?;
+                let PreflightRegion::Terminal(terminal) = region else {
+                    unreachable!("terminal preflight always returns a terminal region")
+                };
+                let Some(lexicon) = self.lexicon else {
+                    return Err(PreflightError::NotMatched);
+                };
+                let Ok(expected) = lexicon.resolve(*identifier) else {
+                    return Err(PreflightError::NotMatched);
+                };
+                if expected.as_str() != &reading.source[terminal.start()..terminal.end()] {
+                    return Err(PreflightError::NotMatched);
+                }
+                Ok(PreflightRegion::Terminal(terminal))
             }
             StructuralForm::Leaf(leaf) => {
                 self.preflight_terminal(reading, &position_triggers, leaf.trigger)
@@ -499,11 +512,7 @@ impl StructuralEvaluator<'_> {
                     &[],
                 ) {
                     Ok(payload) => payload,
-                    Err(PreflightError::NotMatched) => {
-                        return Err(PreflightError::Malformed(DecodeError::ExpectedText {
-                            byte_offset: reading.mark(),
-                        }));
-                    }
+                    Err(PreflightError::NotMatched) => return Err(PreflightError::NotMatched),
                     Err(error) => return Err(error),
                 };
                 let whole = reading.source_bound(head.whole().start(), payload.whole().end())?;
@@ -883,10 +892,14 @@ impl StructuralEvaluator<'_> {
         let profile = self.checked_profile_decode()?;
         let active = self.active_set(profile, terminators, None)?;
         let before_trivia = reading.mark();
-        reading.skip_trivia(profile, &active)?;
-        Ok((complete_on_trivia && reading.mark() != before_trivia)
-            || reading.is_end()
-            || reading.longest_match(profile, &active)?.is_some())
+        let completion = (|| {
+            reading.skip_trivia(profile, &active)?;
+            Ok((complete_on_trivia && reading.mark() != before_trivia)
+                || reading.is_end()
+                || reading.longest_match(profile, &active)?.is_some())
+        })();
+        reading.restore(before_trivia);
+        completion
     }
 
     fn initial_type_triggers(
@@ -1287,5 +1300,27 @@ impl StructuralEvaluator<'_> {
             }
         }
         Err(EncodeError::MissingCanonicalSeparator)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture::FixtureBuilder;
+
+    #[test]
+    fn completion_lookahead_leaves_separator_trivia_for_its_parent() {
+        let table = FixtureBuilder::new().build().expect("fixture table");
+        let profile = FixtureBuilder::token_profile();
+        let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+        let mut reading = TextReading::new("Head Tail");
+        reading.restore("Head".len());
+
+        assert!(
+            evaluator
+                .position_is_complete(&mut reading, &[], true)
+                .expect("completion lookahead")
+        );
+        assert_eq!(reading.mark(), "Head".len());
     }
 }

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use name_table::{IdentifierNamespace, Name, NameTable};
+use name_table::{Identifier, IdentifierNamespace, Name, NameTable};
 use raw_discovery::{
     Delimiter, ProfileRevision, RawProfile, SealedTokenProfile, TokenProfileData,
     TokenProfileError, Trigger, TriggerDefinition, TriggerIdentifier, TriggerSet,
@@ -11,7 +11,7 @@ use structural_codec::{
     AddressedStructuralTable, CarrierLeaf, ConstructorCodec, DecodeError, EncodedConstructorId,
     EncodedLayoutIdentity, LeafCodec, LeafForm, PositionalSignature, RawProfileIdentity,
     ScalarLeaf, ScopedEncodedTypeId, SequenceForm, StructuralEntry, StructuralEvaluator,
-    StructuralForm, TableIdentityPayload,
+    StructuralForm, StructuralValue, TableIdentityPayload,
 };
 
 const PARENTHESIS: TriggerIdentifier = TriggerIdentifier::new(0);
@@ -47,6 +47,30 @@ fn entry(core_type: ScopedEncodedTypeId, form: StructuralForm) -> StructuralEntr
             PositionalSignature::default(),
         )],
     )
+}
+
+fn entry_with_alternatives(
+    core_type: ScopedEncodedTypeId,
+    decode_forms: Vec<StructuralForm>,
+    encode_form: StructuralForm,
+) -> StructuralEntry {
+    StructuralEntry::new(
+        core_type,
+        vec![ConstructorCodec::new(
+            EncodedConstructorId::new(core_type, 0),
+            decode_forms,
+            encode_form,
+            PositionalSignature::default(),
+        )],
+    )
+}
+
+fn literal_application(literal: Identifier, payload: StructuralForm) -> StructuralForm {
+    StructuralForm::application(APPLICATION, StructuralForm::Literal(literal), payload)
+}
+
+fn one_name(names: &mut NameTable, spelling: &str) -> Identifier {
+    names.intern(Name::new(spelling)).expect("fixture literal")
 }
 
 fn table(
@@ -659,4 +683,186 @@ fn sibling_state_failure_keeps_the_nametree_byte_identical() {
         names.to_archive_bytes().expect("after").as_ref()
     );
     assert_eq!(identity_before, names.identity().expect("identity after"));
+}
+
+#[test]
+fn literal_headed_alternatives_check_the_configured_spelling_before_payload() {
+    let profile = RawProfile::standard().seal().expect("standard profile");
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let tool_path = one_name(&mut lexicon, "ToolPath");
+    let derive = one_name(&mut lexicon, "Derive");
+    let configuration = one_name(&mut lexicon, "Configuration");
+    let tool_path_form = literal_application(
+        tool_path,
+        delimited(BRACE, Delimiter::Brace, SequenceForm::Product(Vec::new())),
+    );
+    let derive_form = literal_application(
+        derive,
+        delimited(
+            SQUARE,
+            Delimiter::SquareBracket,
+            SequenceForm::Product(vec![StructuralForm::pascal_atom()]),
+        ),
+    );
+    let configuration_form = literal_application(
+        configuration,
+        delimited(BRACE, Delimiter::Brace, SequenceForm::Product(Vec::new())),
+    );
+    let table = table(
+        &profile,
+        TriggerSet::new(vec![WHITESPACE, COMMENT]),
+        [entry_with_alternatives(
+            OUTER,
+            vec![tool_path_form, derive_form.clone(), configuration_form],
+            derive_form,
+        )],
+    );
+    let evaluator = StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+
+    evaluator
+        .decode_text(OUTER, "Derive.[Clone]", &mut names)
+        .expect("Derive is selected by its literal head");
+}
+
+#[test]
+fn payload_non_match_allows_a_later_disjoint_application_alternative() {
+    let profile = RawProfile::standard().seal().expect("standard profile");
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let derive = one_name(&mut lexicon, "Derive");
+    let brace_payload = literal_application(
+        derive,
+        delimited(BRACE, Delimiter::Brace, SequenceForm::Product(Vec::new())),
+    );
+    let square_payload = literal_application(
+        derive,
+        delimited(
+            SQUARE,
+            Delimiter::SquareBracket,
+            SequenceForm::Product(vec![StructuralForm::pascal_atom()]),
+        ),
+    );
+    let table = table(
+        &profile,
+        TriggerSet::new(vec![WHITESPACE, COMMENT]),
+        [entry_with_alternatives(
+            OUTER,
+            vec![brace_payload, square_payload.clone()],
+            square_payload,
+        )],
+    );
+    let evaluator = StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+
+    evaluator
+        .decode_text(OUTER, "Derive.[Clone]", &mut names)
+        .expect("the square payload alternative remains viable");
+}
+
+#[test]
+fn emitted_literal_application_redecodes_through_its_table() {
+    let profile = RawProfile::standard().seal().expect("standard profile");
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let tool_path = one_name(&mut lexicon, "ToolPath");
+    let derive = one_name(&mut lexicon, "Derive");
+    let configuration = one_name(&mut lexicon, "Configuration");
+    let derive_form = literal_application(
+        derive,
+        delimited(
+            SQUARE,
+            Delimiter::SquareBracket,
+            SequenceForm::Product(vec![StructuralForm::pascal_atom()]),
+        ),
+    );
+    let table = table(
+        &profile,
+        TriggerSet::new(vec![WHITESPACE, COMMENT]),
+        [entry_with_alternatives(
+            OUTER,
+            vec![
+                literal_application(
+                    tool_path,
+                    delimited(BRACE, Delimiter::Brace, SequenceForm::Product(Vec::new())),
+                ),
+                derive_form.clone(),
+                literal_application(
+                    configuration,
+                    delimited(BRACE, Delimiter::Brace, SequenceForm::Product(Vec::new())),
+                ),
+            ],
+            derive_form,
+        )],
+    );
+    let evaluator = StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    assert_eq!(one_name(&mut names, "ToolPath"), tool_path);
+    assert_eq!(one_name(&mut names, "Derive"), derive);
+    assert_eq!(one_name(&mut names, "Configuration"), configuration);
+    let clone = one_name(&mut names, "Clone");
+    let value = StructuralValue::chosen(
+        0,
+        StructuralValue::Application(
+            Box::new(StructuralValue::Atom(derive)),
+            Box::new(StructuralValue::Delimited(vec![StructuralValue::Atom(
+                clone,
+            )])),
+        ),
+    );
+
+    let encoded = evaluator
+        .encode_text(OUTER, &value, &names)
+        .expect("typed value emits through the canonical form");
+    assert_eq!(encoded, "Derive.[Clone]");
+    let mut names_again = NameTable::new(IdentifierNamespace::Fixture);
+    assert_eq!(one_name(&mut names_again, "ToolPath"), tool_path);
+    assert_eq!(one_name(&mut names_again, "Derive"), derive);
+    assert_eq!(one_name(&mut names_again, "Configuration"), configuration);
+
+    assert_eq!(
+        evaluator
+            .decode_text(OUTER, &encoded, &mut names_again)
+            .expect("canonical output re-decodes"),
+        value
+    );
+}
+
+#[test]
+fn unknown_or_ambiguous_literal_alternatives_remain_refused() {
+    let profile = RawProfile::standard().seal().expect("standard profile");
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let derive = one_name(&mut lexicon, "Derive");
+    let form = literal_application(
+        derive,
+        delimited(
+            SQUARE,
+            Delimiter::SquareBracket,
+            SequenceForm::Product(vec![StructuralForm::pascal_atom()]),
+        ),
+    );
+    let table = table(
+        &profile,
+        TriggerSet::new(vec![WHITESPACE, COMMENT]),
+        [entry_with_alternatives(
+            OUTER,
+            vec![form.clone()],
+            form.clone(),
+        )],
+    );
+    let evaluator = StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    assert!(matches!(
+        evaluator.decode_text(OUTER, "Unknown.[Clone]", &mut names),
+        Err(DecodeError::NoAlternative { core_type }) if core_type == OUTER
+    ));
+
+    let ambiguous = entry_with_alternatives(OUTER, vec![form.clone(), form.clone()], form);
+    let payload = TableIdentityPayload {
+        core_universe: structural_codec::FIXTURE_UNIVERSE,
+        core_layout_identity: EncodedLayoutIdentity([0x51; 32]),
+        raw_profile_identity: RawProfileIdentity::from_profile(&profile),
+        trivia_triggers: TriggerSet::new(vec![WHITESPACE, COMMENT]),
+        leaf_codec_contracts: Vec::new(),
+        entries: BTreeMap::from([(OUTER, ambiguous)]),
+    };
+    assert!(AddressedStructuralTable::seal(payload, &profile).is_err());
 }
