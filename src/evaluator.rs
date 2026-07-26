@@ -300,9 +300,15 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
                 Ok(self.source[self.position..self.bound.end()].starts_with(operator))
             }
             DecodeContinuation::Repeated => {
-                let before_trivia = self.position;
-                self.skip_trivia(evaluator)?;
-                if self.position != before_trivia {
+                // A nested form may prove that it reaches a repeated-element
+                // separator, but it cannot consume that separator.  The
+                // repeated loop owns one consumption before choosing its next
+                // element; otherwise an inner delegate could hide the cue its
+                // enclosing application still needs to complete.
+                if self
+                    .local_match(evaluator)?
+                    .is_some_and(|matched| matched.is_trivia())
+                {
                     return Ok(true);
                 }
                 Ok(
@@ -760,6 +766,10 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             return Err(DecodeError::MissingRole { role });
         };
         let mut values = Vec::new();
+        // This loop is the sole owner of separator trivia between repeated
+        // elements.  `DecodeContinuation::Repeated` only observes the cue,
+        // allowing every nested descriptor to complete against it without
+        // stealing it from an enclosing descriptor.
         while !input.finish(self)? {
             let before = input.position;
             values.push(self.decode_descriptor(
