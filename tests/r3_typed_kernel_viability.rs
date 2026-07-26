@@ -162,6 +162,54 @@ fn typed_position_proof_names_roles_and_refuses_unproven_overlap() {
 }
 
 #[test]
+fn typed_position_proof_is_independent_of_record_construction_order() {
+    let declared_order = spike_vocabulary();
+    let private = declared_order
+        .record(RecordType::RustPrivateNewtypeRule)
+        .expect("private rule in declared order");
+    let public = declared_order
+        .record(RecordType::RustPublicNewtypeRule)
+        .expect("public rule in declared order");
+
+    let mut reverse_order = spike_vocabulary();
+    reverse_order.records.reverse();
+    let reverse_private = reverse_order
+        .record(RecordType::RustPrivateNewtypeRule)
+        .expect("private rule in reverse order");
+    let reverse_public = reverse_order
+        .record(RecordType::RustPublicNewtypeRule)
+        .expect("public rule in reverse order");
+
+    assert_eq!(
+        SharedEvaluator::prove_disjoint(private, public),
+        SharedEvaluator::prove_disjoint(reverse_private, reverse_public),
+    );
+}
+
+#[test]
+fn unknown_input_and_ambiguous_alternatives_refuse_without_fallback() {
+    let vocabulary = spike_vocabulary();
+    assert!(matches!(
+        SharedEvaluator::decode(
+            &vocabulary,
+            RecordType::RustPublicNewtypeRule,
+            "pub(crate) struct PublicInteger(Integer);",
+        ),
+        Err(SpikeError::UnexpectedText {
+            role: PositionRole::NewtypeItemKeyword,
+            ..
+        })
+    ));
+
+    let first_public = descriptor(RecordType::RustPublicNewtypeRule);
+    let second_public = descriptor(RecordType::RustPublicNewtypeRule);
+    assert_eq!(
+        SharedEvaluator::prove_disjoint(&first_public, &second_public),
+        Err(SpikeError::NotProvablyDisjoint),
+    );
+}
+
+#[test]
 fn r4_variant_wrapped_u16_identifier_and_typed_hash_boundary_archive() {
     let vocabulary = spike_vocabulary();
     let tree = SharedEvaluator::decode(
