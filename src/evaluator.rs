@@ -42,12 +42,34 @@ impl DecodeState {
 /// execution, so a boundary is validated from its authoritative trigger rather
 /// than guessed from raw-discovery's compatibility delimiter enum.
 pub struct StructuralEvaluator<'table, Record = StructuralRule> {
-    table: &'table AddressedStructuralTable<Record>,
+    pub(crate) table: &'table AddressedStructuralTable<Record>,
     pub(crate) profile: &'table SealedTokenProfile,
-    lexicon: Option<&'table NameTable>,
+    pub(crate) lexicon: Option<&'table NameTable>,
 }
 
 impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
+    /// Construct a text-capable evaluator from the table's sealed profile and
+    /// sealed discovery rules. This is the constructor used by `Textual`.
+    pub fn new(table: &'table AddressedStructuralTable<Record>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            table,
+            profile: table.token_profile(),
+            lexicon: None,
+        })
+    }
+
+    /// Construct a table-owned evaluator with literal resolution data.
+    pub fn with_lexicon(
+        table: &'table AddressedStructuralTable<Record>,
+        lexicon: &'table NameTable,
+    ) -> Result<Self, DecodeError> {
+        let mut evaluator = Self::new(table)?;
+        evaluator.lexicon = Some(lexicon);
+        Ok(evaluator)
+    }
+
+    /// Compatibility constructor for low-level `Block` evaluation. Textual
+    /// execution still uses the profile owned by `table`.
     pub fn with_profile(
         table: &'table AddressedStructuralTable<Record>,
         profile: &'table SealedTokenProfile,
@@ -55,11 +77,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         if table.token_profile_identity() != profile.identity() {
             return Err(DecodeError::TokenProfileIdentityMismatch);
         }
-        Ok(Self {
-            table,
-            profile,
-            lexicon: None,
-        })
+        Self::new(table)
     }
 
     pub fn with_profile_and_lexicon(
@@ -67,9 +85,10 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         profile: &'table SealedTokenProfile,
         lexicon: &'table NameTable,
     ) -> Result<Self, DecodeError> {
-        let mut evaluator = Self::with_profile(table, profile)?;
-        evaluator.lexicon = Some(lexicon);
-        Ok(evaluator)
+        if table.token_profile_identity() != profile.identity() {
+            return Err(DecodeError::TokenProfileIdentityMismatch);
+        }
+        Self::with_lexicon(table, lexicon)
     }
 
     pub fn decode(

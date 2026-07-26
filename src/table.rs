@@ -10,7 +10,10 @@
 //! ```
 //! use std::collections::BTreeMap;
 //!
-//! use raw_discovery::{RawProfile, TriggerSet};
+//! use raw_discovery::{
+//!     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration,
+//!     BoundaryDiscoveryContext, BoundaryDiscoveryContextIdentifier, RawProfile, TriggerSet,
+//! };
 //! use structural_codec::{
 //!     AcceptedDecodeForm, AddressedStructuralTable, ConstructorCodec, DecodeFormId,
 //!     EncodedConstructorId, EncodedLanguage, LeafCodec, ScopedEncodedTypeId,
@@ -37,7 +40,17 @@
 //!     TargetLayoutIdentity::derive(b"downstream encoded layout"),
 //!     profile.identity(),
 //!     StructuralVocabularyIdentity::language(b"downstream vocabulary"),
-//!     TriggerSet::new(vec![]),
+//!     BlockTreeDiscoveryConfiguration::new(
+//!         BoundaryDiscoveryConfiguration::new(
+//!             BoundaryDiscoveryContextIdentifier::new(1),
+//!             vec![BoundaryDiscoveryContext::new(
+//!                 BoundaryDiscoveryContextIdentifier::new(1),
+//!                 TriggerSet::new(vec![]),
+//!             )],
+//!             vec![],
+//!         ),
+//!         vec![],
+//!     ),
 //!     BTreeMap::from([(type_id, entry)]),
 //! );
 //! let table = AddressedStructuralTable::seal(payload, &profile)?;
@@ -48,7 +61,10 @@
 use std::collections::BTreeMap;
 
 use content_identity::{ArchiveError, ContentHash, DomainSeparation, HashDomain, LayoutVersion};
-use raw_discovery::{SealedTokenProfile, TokenProfileDomain, Trigger, TriggerSet};
+use raw_discovery::{
+    BlockTreeDiscoveryConfiguration, SealedBlockTreeDiscoveryConfiguration, SealedTokenProfile,
+    TokenProfileDomain, Trigger, TriggerIdentifier,
+};
 
 use crate::codec::StructuralEntry;
 use crate::error::TableError;
@@ -132,7 +148,7 @@ pub struct TableIdentityPayload<Record = StructuralRule> {
     target_layout_identity: TargetLayoutIdentity,
     token_profile_identity: ContentHash<TokenProfileDomain>,
     vocabulary_identity: StructuralVocabularyIdentity,
-    trivia_triggers: TriggerSet,
+    block_discovery: BlockTreeDiscoveryConfiguration,
     entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
 }
 
@@ -145,7 +161,7 @@ impl<Record> TableIdentityPayload<Record> {
         target_layout_identity: TargetLayoutIdentity,
         token_profile_identity: ContentHash<TokenProfileDomain>,
         vocabulary_identity: StructuralVocabularyIdentity,
-        trivia_triggers: TriggerSet,
+        block_discovery: BlockTreeDiscoveryConfiguration,
         entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
     ) -> Self {
         Self {
@@ -153,19 +169,20 @@ impl<Record> TableIdentityPayload<Record> {
             target_layout_identity,
             token_profile_identity,
             vocabulary_identity,
-            trivia_triggers,
+            block_discovery,
             entries,
         }
     }
 }
 
-/// One truthful R3/R4 layout bump: layout 6 to layout 7.
+/// The table now archives pass-one boundary data. Its identity layout advances
+/// independently of the unchanged structural-value layout.
 pub struct StructuralTableDomain;
 impl HashDomain for StructuralTableDomain {
     fn separation() -> DomainSeparation {
         DomainSeparation::Contextual {
             context: "structural-codec 2026 addressed structural table",
-            layout: LayoutVersion::new(7),
+            layout: LayoutVersion::new(8),
         }
     }
 }
@@ -174,6 +191,8 @@ impl HashDomain for StructuralTableDomain {
 pub struct AddressedStructuralTable<Record = StructuralRule> {
     payload: TableIdentityPayload<Record>,
     identity: ContentHash<StructuralTableDomain>,
+    profile: SealedTokenProfile,
+    block_discovery: SealedBlockTreeDiscoveryConfiguration,
 }
 
 /// Archive capability for the complete static table payload. The blanket
@@ -216,9 +235,15 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
         if payload.token_profile_identity != profile.identity() {
             return Err(TableError::TokenProfileIdentityMismatch);
         }
+        let block_discovery = payload.block_discovery.seal(profile)?;
         Self::validate(&payload, profile)?;
         let identity = payload.table_identity()?;
-        Ok(Self { payload, identity })
+        Ok(Self {
+            payload,
+            identity,
+            profile: profile.clone(),
+            block_discovery,
+        })
     }
 
     pub fn identity(&self) -> ContentHash<StructuralTableDomain> {
@@ -229,6 +254,31 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
     }
     pub fn token_profile_identity(&self) -> ContentHash<TokenProfileDomain> {
         self.payload.token_profile_identity
+    }
+
+    /// The exact sealed profile validated when this table was sealed.
+    pub fn token_profile(&self) -> &SealedTokenProfile {
+        &self.profile
+    }
+
+    /// The sealed block-discovery rules archived in this table's identity
+    /// payload and validated against [`Self::token_profile`].
+    pub fn block_discovery(&self) -> &SealedBlockTreeDiscoveryConfiguration {
+        &self.block_discovery
+    }
+
+    pub(crate) fn discovery_trigger_identifiers(&self) -> Vec<TriggerIdentifier> {
+        let mut identifiers = self
+            .payload
+            .block_discovery
+            .boundaries()
+            .contexts()
+            .iter()
+            .flat_map(|context| context.triggers().triggers().iter().copied())
+            .collect::<Vec<_>>();
+        identifiers.sort_unstable();
+        identifiers.dedup();
+        identifiers
     }
     pub fn vocabulary_identity(&self) -> StructuralVocabularyIdentity {
         self.payload.vocabulary_identity
@@ -241,7 +291,6 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
         payload: &TableIdentityPayload<Record>,
         profile: &SealedTokenProfile,
     ) -> Result<(), TableError> {
-        profile.seal_trigger_set(payload.trivia_triggers.clone())?;
         for type_id in payload.entries.keys() {
             if type_id.language() != payload.language {
                 return Err(TableError::LanguageMismatch {
@@ -289,16 +338,20 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
                             form: accepted.identity(),
                         });
                     }
-                    Self::validate_rule(accepted.rule(), profile)?;
+                    Self::validate_rule(accepted.rule(), profile, &payload.block_discovery)?;
                 }
-                Self::validate_rule(codec.encode_form(), profile)?;
+                Self::validate_rule(codec.encode_form(), profile, &payload.block_discovery)?;
             }
             entry.validate_disjoint_with(&payload.entries)?;
         }
         Ok(())
     }
 
-    fn validate_rule(rule: &Record, profile: &SealedTokenProfile) -> Result<(), TableError> {
+    fn validate_rule(
+        rule: &Record,
+        profile: &SealedTokenProfile,
+        block_discovery: &BlockTreeDiscoveryConfiguration,
+    ) -> Result<(), TableError> {
         struct Roles {
             values: BTreeMap<StableRoleId, SharedDescriptor>,
             duplicate: Option<StableRoleId>,
@@ -346,13 +399,14 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
             .values
             .get(&root)
             .ok_or(TableError::MissingRole { role: root })?;
-        Self::validate_descriptor(descriptor, &roles.values, profile)
+        Self::validate_descriptor(descriptor, &roles.values, profile, block_discovery)
     }
 
     fn validate_descriptor(
         descriptor: &SharedDescriptor,
         roles: &BTreeMap<StableRoleId, SharedDescriptor>,
         profile: &SealedTokenProfile,
+        block_discovery: &BlockTreeDiscoveryConfiguration,
     ) -> Result<(), TableError> {
         match descriptor {
             SharedDescriptor::Application {
@@ -372,7 +426,7 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
                     let child = roles
                         .get(role)
                         .ok_or(TableError::MissingRole { role: *role })?;
-                    Self::validate_descriptor(child, roles, profile)?;
+                    Self::validate_descriptor(child, roles, profile, block_discovery)?;
                 }
             }
             SharedDescriptor::Delimited { boundary, content }
@@ -385,13 +439,23 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
                         identifier: *boundary,
                     });
                 }
+                if !block_discovery
+                    .boundaries()
+                    .contexts()
+                    .iter()
+                    .any(|context| context.triggers().triggers().contains(boundary))
+                {
+                    return Err(TableError::UnconfiguredDiscoveryBoundary {
+                        boundary: *boundary,
+                    });
+                }
                 let child = roles
                     .get(content)
                     .ok_or(TableError::MissingRole { role: *content })?;
-                Self::validate_descriptor(child, roles, profile)?;
+                Self::validate_descriptor(child, roles, profile, block_discovery)?;
             }
             SharedDescriptor::Repeated { element, .. } => {
-                Self::validate_descriptor(element, roles, profile)?
+                Self::validate_descriptor(element, roles, profile, block_discovery)?
             }
             SharedDescriptor::Atom(atom) => {
                 if let Some(trigger) = atom.trigger {
@@ -416,8 +480,6 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-
-    use raw_discovery::TriggerSet;
 
     use super::*;
     use crate::codec::{AcceptedDecodeForm, ConstructorCodec};
@@ -447,7 +509,7 @@ mod tests {
             TargetLayoutIdentity::derive(b"test target layout"),
             profile.identity(),
             StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
-            TriggerSet::new(vec![]),
+            crate::fixture::FixtureBuilder::block_discovery(),
             BTreeMap::from([(logos_entry().encoded_type(), logos_entry())]),
         );
         assert!(matches!(
@@ -463,7 +525,7 @@ mod tests {
             TargetLayoutIdentity::derive(b"test target layout"),
             other_profile.identity(),
             StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
-            TriggerSet::new(vec![]),
+            crate::fixture::FixtureBuilder::block_discovery(),
             BTreeMap::new(),
         );
         assert!(matches!(

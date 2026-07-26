@@ -13,10 +13,10 @@ fn actual_typed_rule_records_archive_and_restore() {
 }
 
 #[test]
-fn layout_domain_is_the_single_r3_r4_bump() {
+fn table_layout_bumps_for_sealed_discovery_rules() {
     assert_eq!(
         <StructuralTableDomain as content_identity::HashDomain>::layout_version().value(),
-        7
+        8
     );
 }
 
@@ -25,7 +25,7 @@ fn final_combined_shape_digest_locks() {
     let table = FixtureBuilder::new().build().expect("table");
     assert_eq!(
         table.identity().to_hexadecimal(),
-        "65ea762dfd9e5670c588f460fa1ab59e0937f7bdef89c8470e6963000ee8abf1"
+        "49d0cdc188467f7e1bc03fcfa3035fd2ad2c322a9c68a50b55dc2943a3dfef6e"
     );
     let profile = FixtureBuilder::token_profile();
     let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");

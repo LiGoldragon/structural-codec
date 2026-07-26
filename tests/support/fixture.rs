@@ -5,7 +5,12 @@
 
 use std::collections::BTreeMap;
 
-use raw_discovery::{RawProfile, SealedTokenProfile, TriggerIdentifier, TriggerSet};
+use raw_discovery::{
+    BlockPrefixAttachment, BlockPrefixRule, BlockTreeDiscoveryConfiguration,
+    BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext, BoundaryDiscoveryContextIdentifier,
+    BoundaryDiscoveryTransition, CharacterClass, RawProfile, SealedTokenProfile, TriggerIdentifier,
+    TriggerSet,
+};
 
 use crate::codec::{AcceptedDecodeForm, ConstructorCodec, StructuralEntry};
 use crate::error::TableError;
@@ -29,6 +34,7 @@ pub const DATABASE_MARKER: ScopedEncodedTypeId = ScopedEncodedTypeId::fixture_sc
 pub const FIELD: ScopedEncodedTypeId = ScopedEncodedTypeId::fixture_schema(0xf017);
 
 pub const PARENTHESIS_BOUNDARY: TriggerIdentifier = TriggerIdentifier::new(0);
+pub const SQUARE_BOUNDARY: TriggerIdentifier = TriggerIdentifier::new(1);
 pub const BRACE_BOUNDARY: TriggerIdentifier = TriggerIdentifier::new(2);
 pub const APPLICATION_OPERATOR: TriggerIdentifier = TriggerIdentifier::new(3);
 pub const WHITESPACE_TRIVIA: TriggerIdentifier = TriggerIdentifier::new(5);
@@ -64,6 +70,45 @@ impl FixtureBuilder {
             .expect("the standard fixture profile seals")
     }
 
+    pub fn block_discovery() -> BlockTreeDiscoveryConfiguration {
+        let root = BoundaryDiscoveryContextIdentifier::new(1);
+        BlockTreeDiscoveryConfiguration::new(
+            BoundaryDiscoveryConfiguration::new(
+                root,
+                vec![BoundaryDiscoveryContext::new(
+                    root,
+                    TriggerSet::new(vec![
+                        PARENTHESIS_BOUNDARY,
+                        SQUARE_BOUNDARY,
+                        BRACE_BOUNDARY,
+                        TriggerIdentifier::new(4),
+                        WHITESPACE_TRIVIA,
+                        COMMENT_TRIVIA,
+                    ]),
+                )],
+                vec![
+                    BoundaryDiscoveryTransition::new(root, PARENTHESIS_BOUNDARY, root),
+                    BoundaryDiscoveryTransition::new(root, SQUARE_BOUNDARY, root),
+                    BoundaryDiscoveryTransition::new(root, BRACE_BOUNDARY, root),
+                ],
+            ),
+            vec![
+                BlockPrefixAttachment::new(
+                    PARENTHESIS_BOUNDARY,
+                    BlockPrefixRule::new(".", CharacterClass::AsciiAlphabetic),
+                ),
+                BlockPrefixAttachment::new(
+                    SQUARE_BOUNDARY,
+                    BlockPrefixRule::new(".", CharacterClass::AsciiAlphabetic),
+                ),
+                BlockPrefixAttachment::new(
+                    BRACE_BOUNDARY,
+                    BlockPrefixRule::new(".", CharacterClass::AsciiAlphabetic),
+                ),
+            ],
+        )
+    }
+
     pub fn build(&self) -> Result<AddressedStructuralTable, TableError> {
         let profile = Self::token_profile();
         let entries = self
@@ -79,7 +124,7 @@ impl FixtureBuilder {
                 StructuralVocabularyIdentity::fixture(
                     b"structural-codec fixture typed vocabulary R3/R4",
                 ),
-                TriggerSet::new(vec![WHITESPACE_TRIVIA, COMMENT_TRIVIA]),
+                Self::block_discovery(),
                 entries,
             ),
             &profile,

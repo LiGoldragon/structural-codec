@@ -35,9 +35,6 @@
 
 use std::marker::PhantomData;
 
-use name_table::{NameTable, NameTableError, NameTransaction};
-use raw_discovery::SealedTokenProfile;
-
 use crate::encoded_form::EncodedForm;
 use crate::error::{DecodeError, EncodeError, SingleChunkRequired};
 use crate::evaluator::StructuralEvaluator;
@@ -45,6 +42,7 @@ use crate::form::{StructuralRule, StructureRecord};
 use crate::ids::ScopedEncodedTypeId;
 use crate::table::AddressedStructuralTable;
 use crate::value::StructuralValue;
+use name_table::{NameTable, NameTableError, NameTransaction};
 
 /// The rendered textual VIEW of an [`EncodedForm<T>`](crate::EncodedForm) — the
 /// first-class value a [`Textual::view`] produces and a [`Textual::unview`] consumes. An
@@ -143,10 +141,6 @@ where
     /// This data defines the encoder and decoder.
     fn structuretree(&self) -> &AddressedStructuralTable<Record>;
 
-    /// The separately sealed token profile whose identity the structuretree
-    /// pins. It supplies every textual boundary spelling and carrier policy.
-    fn token_profile(&self) -> &SealedTokenProfile;
-
     /// The lexicon the table's [`Literal`](crate::form::SharedDescriptor::Literal) descriptors
     /// resolve through; `None` when the table carries no literal keywords.
     fn lexicon(&self) -> Option<&NameTable> {
@@ -180,14 +174,9 @@ where
     /// when the table carries `Literal` forms and without it otherwise.
     fn evaluator(&self) -> Result<StructuralEvaluator<'_, Record>, Self::Error> {
         match self.lexicon() {
-            Some(lexicon) => StructuralEvaluator::with_profile_and_lexicon(
-                self.structuretree(),
-                self.token_profile(),
-                lexicon,
-            )
-            .map_err(Self::Error::from),
-            None => StructuralEvaluator::with_profile(self.structuretree(), self.token_profile())
+            Some(lexicon) => StructuralEvaluator::with_lexicon(self.structuretree(), lexicon)
                 .map_err(Self::Error::from),
+            None => StructuralEvaluator::new(self.structuretree()).map_err(Self::Error::from),
         }
     }
 

@@ -2,7 +2,7 @@
 
 use content_identity::ArchiveError;
 use name_table::NameTableError;
-use raw_discovery::{RecognizeError, TokenProfileError, TriggerIdentifier};
+use raw_discovery::{BlockDiscoveryError, RecognizeError, TokenProfileError, TriggerIdentifier};
 
 use crate::form::DelegationPayload;
 use crate::ids::{EncodedConstructorId, ScopedEncodedTypeId, StableRoleId};
@@ -61,6 +61,8 @@ pub enum DecodeError {
     TokenProfileIdentityMismatch,
     #[error(transparent)]
     TokenProfile(#[from] TokenProfileError),
+    #[error(transparent)]
+    BlockDiscovery(#[from] BlockDiscoveryError),
     #[error(transparent)]
     Recognition(#[from] RecognizeError),
     #[error("no structural entry for expected type {0:?}")]
@@ -198,6 +200,12 @@ pub enum TableError {
     MissingRole { role: StableRoleId },
     #[error("trigger {identifier:?} does not provide the required role")]
     WrongTriggerKind { identifier: TriggerIdentifier },
+    #[error(
+        "boundary {boundary:?} is used by a structural form but absent from the table discovery rules"
+    )]
+    UnconfiguredDiscoveryBoundary { boundary: TriggerIdentifier },
+    #[error(transparent)]
+    BlockDiscovery(#[from] BlockDiscoveryError),
     #[error(transparent)]
     TokenProfile(#[from] TokenProfileError),
 }

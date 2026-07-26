@@ -39,17 +39,22 @@ Fixture vocabularies have their own content-hash domain and may contain only the
 reserved Schema range, preventing accidental composition with production
 sidecars.
 
-`StructuralTableDomain` moves exactly once from layout 6 to layout 7 for this
-combined R3/R4 train. `StructuralValueDomain` moves from 1 to 2 because the
-archived value is now constructor-tagged and role-keyed.
+`StructuralTableDomain` moves from layout 7 to layout 8 because the archived
+identity payload now includes the canonical pass-one discovery configuration.
+`StructuralValueDomain` remains at layout 2: the archived value stays
+constructor-tagged and role-keyed.
 
 ## Boundaries and values
 
 Delimited descriptors name the authoritative profile boundary trigger; they do
-not duplicate `raw-discovery::Delimiter` in a table preimage. Direct `Block`
-evaluation receives the sealed profile and validates that the raw delimiter is
-the one spelled by that trigger. Text enters through raw-discovery's
-profile-bound, boundary-first recognizer and then runs the same evaluator.
+not duplicate `raw-discovery::Delimiter` in a table preimage. A sealed table
+owns the exact sealed token profile and its canonical, archiveable
+block-discovery configuration. It validates both together while sealing and
+includes the rules in the table identity payload. Text first creates a complete
+source-bounded `DiscoveredBlockTree` from those table-owned rules. The same
+shared evaluator then interprets each expected descriptor against only its
+bounded source and the already-discovered children. Direct `Block` evaluation
+remains a separate low-level compatibility surface.
 
 The evaluator result is `StructuralValue { constructor, fields }`, where
 `fields` is a `RoleKeyedMirror`. A manual `Textual::reflect` starts a checked
@@ -61,9 +66,9 @@ conservative disjointness proof. Delegate payload constraints participate in
 that proof, and active delegate expansion is a typed cycle error.
 `MissingLexicon` and name-resolution failures remain distinct from
 `LiteralMismatch`; only a genuine structural non-match may try a disjoint
-alternative. `Textual::evaluator` returns a typed profile/table mismatch rather
-than panicking, and its encoded form is statically associated with the same
-language marker as its textual view.
+alternative. A `Textual` implementation supplies the table but no parallel
+profile or discovery configuration, and its encoded form is statically
+associated with the same language marker as its textual view.
 
 ## Open item
 

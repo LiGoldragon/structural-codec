@@ -5,7 +5,10 @@
 use std::collections::BTreeMap;
 
 use name_table::{Identifier, IdentifierNamespace, NameTable, NameTableError, NameTransaction};
-use raw_discovery::{RawProfile, SealedTokenProfile, TokenProfileError, TriggerSet};
+use raw_discovery::{
+    BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext,
+    BoundaryDiscoveryContextIdentifier, RawProfile, TokenProfileError, TriggerSet,
+};
 use structural_codec::{
     AcceptedDecodeForm, AddressedStructuralTable, AtomCase, AtomDescriptor, AuthoringError,
     ChunkName, ConstructorCodec, DecodeError, DecodeFormId, EncodeError, EncodedConstructorId,
@@ -154,7 +157,6 @@ enum ExternalTextualError {
 
 struct ExternalTextual {
     table: AddressedStructuralTable<ExternalRules>,
-    profile: SealedTokenProfile,
 }
 
 impl ExternalTextual {
@@ -187,12 +189,21 @@ impl ExternalTextual {
                     TargetLayoutIdentity::derive(b"external encoded layout"),
                     profile.identity(),
                     StructuralVocabularyIdentity::language(vocabulary),
-                    TriggerSet::new(vec![]),
+                    BlockTreeDiscoveryConfiguration::new(
+                        BoundaryDiscoveryConfiguration::new(
+                            BoundaryDiscoveryContextIdentifier::new(1),
+                            vec![BoundaryDiscoveryContext::new(
+                                BoundaryDiscoveryContextIdentifier::new(1),
+                                TriggerSet::new(vec![]),
+                            )],
+                            vec![],
+                        ),
+                        vec![],
+                    ),
                     BTreeMap::from([(VALUE, entry)]),
                 ),
                 &profile,
             )?,
-            profile,
         })
     }
 }
@@ -204,10 +215,6 @@ impl Textual<ExternalRules> for ExternalTextual {
 
     fn structuretree(&self) -> &AddressedStructuralTable<ExternalRules> {
         &self.table
-    }
-
-    fn token_profile(&self) -> &SealedTokenProfile {
-        &self.profile
     }
 
     fn missing_root_object(&self) -> Self::Error {

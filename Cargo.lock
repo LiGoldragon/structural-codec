@@ -265,7 +265,7 @@ dependencies = [
 [[package]]
 name = "raw-discovery"
 version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/raw-discovery.git?rev=01b21b94460ba99f4ffbab4d4d4c86661a040208#01b21b94460ba99f4ffbab4d4d4c86661a040208"
+source = "git+https://github.com/LiGoldragon/raw-discovery.git?rev=445ffae3be5ae79389396289b65849bb914b56c6#445ffae3be5ae79389396289b65849bb914b56c6"
 dependencies = [
  "content-identity",
  "rkyv",

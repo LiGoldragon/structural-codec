@@ -7,9 +7,13 @@ the evaluator receives only an ephemeral heterogeneous borrowed view for shared
 traversal.
 
 The table stores a language dimension, a typed target-layout content identity,
-the exact `ContentHash<TokenProfileDomain>`, and a vocabulary identity. Fixture
-vocabularies use a separate identity domain and reserved Schema ids, so they
-cannot compose with production Schema sidecars.
+the exact `ContentHash<TokenProfileDomain>`, canonical block-discovery rules,
+and a vocabulary identity. Sealing binds the rules to the exact profile and the
+table owns both runtime values. Textual decode discovers source-bounded blocks
+before expectation-driven evaluation; Textual encode writes profile spellings
+directly from the typed descriptors. Fixture vocabularies use a separate
+identity domain and reserved Schema ids, so they cannot compose with production
+Schema sidecars.
 
 There is one evaluator and one conservative disjointness prover.
 `ConstructorCodec<R>` and `AddressedStructuralTable<R>` accept any archived

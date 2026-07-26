@@ -5,9 +5,9 @@
 use std::collections::BTreeMap;
 
 use name_table::{IdentifierNamespace, Name, NameTable, NameTableError};
-use raw_discovery::{Recognizer, TriggerSet};
+use raw_discovery::Recognizer;
 
-use crate::fixture::{APPLICATION_OPERATOR, BRACE_BOUNDARY, COMMENT_TRIVIA, WHITESPACE_TRIVIA};
+use crate::fixture::{APPLICATION_OPERATOR, BRACE_BOUNDARY};
 use crate::{
     AcceptedDecodeForm, AddressedStructuralTable, ApplicationDelimitedRule, ApplicationRule,
     AtomCase, AtomDescriptor, ConstructorCodec, DecodeError, DecodeFormId, DelegationPayload,
@@ -77,7 +77,7 @@ fn seal_entries(
             TargetLayoutIdentity::derive(b"disjointness typed-record layout"),
             profile.identity(),
             StructuralVocabularyIdentity::fixture(b"disjointness typed-record vocabulary"),
-            TriggerSet::new(vec![WHITESPACE_TRIVIA, COMMENT_TRIVIA]),
+            crate::fixture::FixtureBuilder::block_discovery(),
             entries,
         ),
         &profile,
@@ -695,7 +695,7 @@ fn r4_ids_archive_as_distinct_language_variants_and_associations_are_checked() {
                 TargetLayoutIdentity::derive(b"cross-language table"),
                 profile.identity(),
                 StructuralVocabularyIdentity::language(b"cross-language vocabulary"),
-                TriggerSet::new(vec![]),
+                crate::fixture::FixtureBuilder::block_discovery(),
                 BTreeMap::from([(logos_entry.encoded_type(), logos_entry)]),
             ),
             &profile,

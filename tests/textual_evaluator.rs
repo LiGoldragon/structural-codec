@@ -4,7 +4,6 @@ use crate::{
     StructuralValue, Textual,
 };
 use name_table::{IdentifierNamespace, NameTable, NameTableError, NameTransaction};
-use raw_discovery::SealedTokenProfile;
 
 struct FixtureLanguage;
 struct FixtureEncoded;
@@ -15,7 +14,6 @@ impl EncodedForm for FixtureEncoded {
 
 struct ProfileBoundTextual {
     table: crate::AddressedStructuralTable,
-    profile: SealedTokenProfile,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,10 +37,6 @@ impl Textual for ProfileBoundTextual {
 
     fn structuretree(&self) -> &crate::AddressedStructuralTable {
         &self.table
-    }
-
-    fn token_profile(&self) -> &SealedTokenProfile {
-        &self.profile
     }
 
     fn missing_root_object(&self) -> Self::Error {
@@ -90,17 +84,35 @@ fn text_entry_uses_the_same_profile_bound_record_evaluator() {
 }
 
 #[test]
-fn textual_evaluator_returns_profile_mismatch_instead_of_panicking() {
+fn carrier_text_is_opaque_to_boundary_discovery_and_round_trips_directly() {
+    let table = FixtureBuilder::new().build().expect("table");
+    let evaluator = StructuralEvaluator::new(&table).expect("table evaluator");
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let source = "(| } ] ) . ;; carrier content |)";
+    let value = evaluator
+        .decode_text(DOCUMENTATION, source, &mut names)
+        .expect("opaque carrier decode");
+
+    assert_eq!(
+        evaluator
+            .encode_text(DOCUMENTATION, &value, &names)
+            .expect("direct carrier encode"),
+        source
+    );
+}
+
+#[test]
+fn low_level_evaluator_returns_profile_mismatch_instead_of_panicking() {
     let mouth = ProfileBoundTextual {
         table: FixtureBuilder::new().build().expect("table"),
-        profile: raw_discovery::RawProfile::nomos_extended()
-            .seal()
-            .expect("alternate profile"),
     };
     assert!(matches!(
-        mouth.evaluator(),
-        Err(TextualTestError::Decode(
-            DecodeError::TokenProfileIdentityMismatch
-        ))
+        StructuralEvaluator::with_profile(
+            &mouth.table,
+            &raw_discovery::RawProfile::nomos_extended()
+                .seal()
+                .expect("alternate profile"),
+        ),
+        Err(DecodeError::TokenProfileIdentityMismatch)
     ));
 }
