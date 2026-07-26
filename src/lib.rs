@@ -42,6 +42,8 @@ pub mod evaluator;
 pub mod fixture;
 pub mod form;
 pub mod ids;
+#[doc(hidden)]
+pub mod r3_typed_kernel_spike;
 pub mod table;
 mod text;
 pub mod textual_form;
