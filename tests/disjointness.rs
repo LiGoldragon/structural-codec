@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use content_identity::PortableArchive;
 use name_table::{IdentifierNamespace, Name, NameTable, NameTableError};
 use raw_discovery::{
     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext,
@@ -13,11 +14,11 @@ use raw_discovery::{
 
 use crate::fixture::{APPLICATION_OPERATOR, BRACE_BOUNDARY};
 use crate::{
-    AcceptedDecodeForm, AddressedStructuralTable, ApplicationDelimitedRule, ApplicationRule,
-    AtomCase, AtomDescriptor, ConstructorCodec, DecodeError, DecodeFormId, DelegationPayload,
-    DisjointnessError, EncodeError, EncodedConstructorId, EncodedLanguage, FieldValue,
-    RoleKeyedMirror, ScopedEncodedTypeId, SharedDescriptor, StructuralEntry, StructuralEvaluator,
-    StructuralRule, StructuralValue, StructuralVocabularyIdentity, TableError,
+    AcceptedDecodeForm, AddressedStructuralTable, ApplicationDelimitedRule, ApplicationPayload,
+    ApplicationRule, AtomCase, AtomDescriptor, ConstructorCodec, DecodeError, DecodeFormId,
+    DelegationPayload, DisjointnessError, EncodeError, EncodedConstructorId, EncodedLanguage,
+    FieldValue, LeafCodec, RoleKeyedMirror, ScopedEncodedTypeId, SharedDescriptor, StructuralEntry,
+    StructuralEvaluator, StructuralRule, StructuralValue, StructuralVocabularyIdentity, TableError,
     TableIdentityPayload, TargetLayoutIdentity, UnaryRoot, UnaryRule,
 };
 
@@ -476,7 +477,7 @@ fn accepted_application_payload_non_match_falls_through_to_the_disjoint_form() {
 #[test]
 fn constructor_and_form_vector_order_never_select_meaning() {
     let application_rule = application(
-        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Leaf(LeafCodec::Text),
         SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::CamelCase)),
     );
     let bare_rule = atom(AtomCase::PascalCase);
@@ -496,7 +497,7 @@ fn constructor_and_form_vector_order_never_select_meaning() {
         seal_entry(entry(TYPE, codecs)).expect("disjoint table")
     };
     let profile = crate::fixture::FixtureBuilder::token_profile();
-    let mut encodings = Vec::new();
+    let mut identities = Vec::new();
     for table in [make(false), make(true)] {
         let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
         let mut names = NameTable::new(IdentifierNamespace::Fixture);
@@ -504,15 +505,68 @@ fn constructor_and_form_vector_order_never_select_meaning() {
             .decode_text(TYPE, "Head.payload", &mut names)
             .expect("application alternative after an atom prefix");
         assert_eq!(application.constructor().local(), 9);
-        encodings.push(
+        assert_eq!(
+            application.field::<ApplicationPayload>(),
+            Some(&FieldValue::Atom(
+                IdentifierNamespace::Fixture.identifier(0)
+            )),
+            "only the selected application payload is interned"
+        );
+        assert_eq!(
+            names.lookup(&Name::new("payload")),
+            Some(IdentifierNamespace::Fixture.identifier(0))
+        );
+        assert!(
+            names.lookup(&Name::new("Head")).is_none(),
+            "the incomplete bare-atom candidate must not leak its prefix"
+        );
+
+        let mut expected_names = NameTable::new(IdentifierNamespace::Fixture);
+        expected_names
+            .intern(Name::new("payload"))
+            .expect("fixture name capacity");
+        assert_eq!(
+            names
+                .to_archive_bytes()
+                .expect("application name archive")
+                .as_ref(),
+            expected_names
+                .to_archive_bytes()
+                .expect("expected name archive")
+                .as_ref()
+        );
+        assert_eq!(
+            names.identity().expect("application name identity"),
+            expected_names.identity().expect("expected name identity")
+        );
+        identities.push((
+            application
+                .to_archive_bytes()
+                .expect("application value archive")
+                .to_vec(),
+            application
+                .content_identity()
+                .expect("application value identity")
+                .to_hexadecimal(),
+            names
+                .to_archive_bytes()
+                .expect("application name archive")
+                .to_vec(),
+            names
+                .identity()
+                .expect("application name identity")
+                .to_hexadecimal(),
+        ));
+        assert_eq!(
             evaluator
                 .encode_text(TYPE, &application, &names)
                 .expect("canonical application encode"),
+            "Head.payload"
         );
         assert_eq!(
             evaluator
-                .decode_text(TYPE, "Entry", &mut names)
-                .expect("bare alternative")
+                .decode_text(TYPE, "Head", &mut names)
+                .expect("bare Head alternative")
                 .constructor()
                 .local(),
             7
@@ -543,7 +597,10 @@ fn constructor_and_form_vector_order_never_select_meaning() {
             Err(DecodeError::UnknownType(actual)) if actual == unknown
         ));
     }
-    assert_eq!(encodings, ["Head.payload", "Head.payload"]);
+    assert_eq!(
+        identities[0], identities[1],
+        "accepted-form order must not affect the resulting value or name archive"
+    );
 }
 
 #[test]
@@ -640,7 +697,7 @@ fn nested_product_repetition_alternative_requires_local_completion() {
     let inner = ScopedEncodedTypeId::schema(0xf101);
     let outer = ScopedEncodedTypeId::schema(0xf102);
     let application_rule = application(
-        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Leaf(LeafCodec::Text),
         SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::CamelCase)),
     );
     let bare_rule = atom(AtomCase::PascalCase);
@@ -671,6 +728,7 @@ fn nested_product_repetition_alternative_requires_local_completion() {
         .expect("nested atom and application forms are disjoint")
     };
     let profile = crate::fixture::FixtureBuilder::token_profile();
+    let mut name_archives = Vec::new();
     for table in [make(false), make(true)] {
         let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
         let mut names = NameTable::new(IdentifierNamespace::Fixture);
@@ -684,7 +742,30 @@ fn nested_product_repetition_alternative_requires_local_completion() {
                 .expect("nested canonical encode"),
             "Container.{Head.payload}"
         );
+        assert_eq!(
+            names.lookup(&Name::new("Container")),
+            Some(IdentifierNamespace::Fixture.identifier(0))
+        );
+        assert_eq!(
+            names.lookup(&Name::new("payload")),
+            Some(IdentifierNamespace::Fixture.identifier(1))
+        );
+        assert!(
+            names.lookup(&Name::new("Head")).is_none(),
+            "a rejected delegated alternative must not leak into its enclosing draft"
+        );
+        name_archives.push((
+            names
+                .to_archive_bytes()
+                .expect("nested name archive")
+                .to_vec(),
+            names
+                .identity()
+                .expect("nested name identity")
+                .to_hexadecimal(),
+        ));
     }
+    assert_eq!(name_archives[0], name_archives[1]);
 }
 
 #[test]
