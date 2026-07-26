@@ -1,6 +1,7 @@
 [package]
 name         = "structural-codec"
-version      = "0.5.0"
+version      = "0.6.0"
+autotests    = false
 edition      = "2024"
 rust-version = "1.85"
 license      = "MIT OR Apache-2.0"
@@ -12,10 +13,14 @@ publish      = false
 name = "structural_codec"
 path = "src/lib.rs"
 
+[[test]]
+name = "downstream_authoring"
+path = "tests/downstream_authoring.rs"
+
 [dependencies]
-content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "ac0075842799b3ece8909ad0eb4b8a92b596b188" }
-name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "a1705ef512efec28925ae3ffc9faa5a2aa4dc4a8" }
-raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "c27a9efabb1981c8b3d887c870fff82fc7daf49c" }
+content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "24b43bae5d9748b0e7f679c6ec9f85a643c4d36a" }
+name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "196610e2907687dcb8dbd0d2dfaafe4aefd9fa27" }
+raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "01b21b94460ba99f4ffbab4d4d4c86661a040208" }
 rkyv             = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 thiserror        = "2"
 

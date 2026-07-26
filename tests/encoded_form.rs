@@ -4,8 +4,8 @@
 //! identifiers and the target NameTable composes the source slice rather than
 //! resolving and re-interning its names.
 
+use crate::{Converted, EncodedConversion, EncodedForm, TextualForm};
 use name_table::{IdentifierNamespace, Name, NameTable};
-use structural_codec::{Converted, EncodedConversion, EncodedForm, TextualForm};
 
 struct SourceLanguage;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,7 +77,7 @@ fn textual_form_value_carries_the_single_document_case_trivially() {
 
 #[test]
 fn textual_form_multi_chunk_view_refuses_a_sole_text_read() {
-    use structural_codec::{ChunkName, TextChunk};
+    use crate::{ChunkName, TextChunk};
     let view: TextualForm<SourceLanguage> = TextualForm::from_chunks(vec![
         TextChunk {
             name: ChunkName("a.rs".to_string()),

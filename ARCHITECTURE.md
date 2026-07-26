@@ -1,143 +1,73 @@
-# structural-codec — architecture
+# structural-codec architecture
 
-This file records the durable direction of the crate. It is backed by the
-psyche-accepted design in the primary workspace `reports/logos/up-close-design-v1.md`
-(§4.1, §4.1.1, §4.6, §7.3) and `reports/logos/shared-codec-library-v1.md`.
+The crate owns the archived structural-codec sidecar and its one shared
+evaluator. It depends on `content-identity`, `name-table`, and `raw-discovery`;
+it does not own a language parser or a second language-specific interpreter.
 
-## Purpose
+## R3 fixed rules
 
-structural-codec is L4 — the hardened kernel of the shared-codec family. It turns
-a dialect's textual behaviour into content-addressed **data** (a table of
-structural forms) and ships **one trusted evaluator** that executes that table in
-both directions. Parser behaviour becomes serializable, inspectable, versionable
-data with a proven round-trip — the psyche's "library instinct" raised one level.
+Fixed positions are actual archived record fields. `Position<Role, Descriptor>`
+stores both a descriptor and an archived stable role identity. A role marker alone
+is never the identity. `FieldLink` is a borrowed heterogeneous view used only
+while the shared evaluator or prover traverses a record; it is not archivable.
 
-## Dependency posture (strictly downward)
+`ConstructorCodec<R>`, `StructuralEntry<R>`, `TableIdentityPayload<R>`,
+`AddressedStructuralTable<R>`, `StructuralEvaluator<R>`, and the prover all
+operate over a record `R` that exposes only its borrowed typed fields and root
+role through `StructureRecord`. `StructuralRule` remains the kernel convenience
+vocabulary; it is not the only accepted rule carrier. A downstream vocabulary
+combines several archived record types with `RuleCoproduct<L, R>`, whose branch
+match selects data only. Decode, encode, boundary lookup, and proof all run in
+`StructuralEvaluator` or `disjoint`; no record trait supplies those algorithms.
+A fixed product, positional signature, fixed-position vector, and position
+counting have no persisted representation.
 
-```
-content-identity  ← name-table  ← raw-discovery  ← structural-codec
-```
+## R4 identities and sidecars
 
-Stringless Core never depends on text: `content-identity` (portable archive +
-`ContentHash<Domain>`) and `name-table` (the identifier space) sit below the raw
-text layer. structural-codec consumes all three as git dependencies pinned to
-published revisions. It edits none of them.
+`ScopedEncodedTypeId` and `EncodedConstructorId` are opaque archived values.
+Their private Schema/Logos/Nomos variants carry `u16` locals, and constructor
+identity contains its owning type identity. Public associated constructors mint
+the language-qualified type and constructor-under-type associations; a table
+then rejects duplicate constructor/form identities and any entry, constructor,
+or language disagreement. Alternative vector order consequently cannot select
+meaning.
 
-## The kernel / authoring split (design ruling 1)
+The table pins its `ContentHash<TokenProfileDomain>` directly. Its target layout
+uses a structural-codec-owned `TargetLayoutDomain`; raw bytes and zero/default
+layout identities have no API. Table data also holds a typed vocabulary identity.
+Fixture vocabularies have their own content-hash domain and may contain only the
+reserved Schema range, preventing accidental composition with production
+sidecars.
 
-The kernel `StructuralForm` is deliberately six cases. The psyche's named
-authoring structs are preserved as a distinct **authoring vocabulary**
-(`AuthoringForm`) that `normalize()`s to kernel forms before hashing or
-evaluation. This keeps the substrate minimal and content-identity stable while the
-authoring surface stays expressive. `macro` is reserved for Nomos; textual
-structure is `StructuralForm` data. The view family is `Textual*`.
+`StructuralTableDomain` moves exactly once from layout 6 to layout 7 for this
+combined R3/R4 train. `StructuralValueDomain` moves from 1 to 2 because the
+archived value is now constructor-tagged and role-keyed.
 
-## Table identity lives outside the payload (design §4.6)
+## Boundaries and values
 
-A table's content identity is computed over `TableIdentityPayload`
-(`EncodedUniverseId`, Core-layout identity, raw-profile identity, leaf-codec contract
-identities, and the entries) and **stored on the table, not inside the hashed
-payload** — this fixes the self-reference bug of an earlier rendering. The
-payload pins the separately sealed token-profile identity, universal trivia
-triggers, and every form-position trigger. The table identity is **excluded
-from Core value identity by construction**: Core hashing never sees the table,
-so text evolution can never move Core identity. Old table decodes old text, a
-new table encodes new text, both reach the same Core value.
+Delimited descriptors name the authoritative profile boundary trigger; they do
+not duplicate `raw-discovery::Delimiter` in a table preimage. Direct `Block`
+evaluation receives the sealed profile and validates that the raw delimiter is
+the one spelled by that trigger. Text enters through raw-discovery's
+profile-bound, boundary-first recognizer and then runs the same evaluator.
 
-## The evaluator ships in the runtime (Fork C, settled)
+The evaluator result is `StructuralValue { constructor, fields }`, where
+`fields` is a `RoleKeyedMirror`. A manual `Textual::reflect` starts a checked
+`StructuralValue::record` and adds values only through typed field roles;
+`reify` retrieves them through the same typed role API. Reification and
+reflection stay manual on `Textual`; no grammar or ordering logic is derived
+there. Several accepted text forms may map to one constructor, subject to the
+conservative disjointness proof. Delegate payload constraints participate in
+that proof, and active delegate expansion is a typed cycle error.
+`MissingLexicon` and name-resolution failures remain distinct from
+`LiteralMismatch`; only a genuine structural non-match may try a disjoint
+alternative. `Textual::evaluator` returns a typed profile/table mismatch rather
+than panicking, and its encoded form is statically associated with the same
+language marker as its textual view.
 
-The psyche settled that the evaluator ships in the runtime, not only in
-conformance tests: dialect tables are genuinely data-loadable at runtime and the
-evaluator executes them directly. Generated codecs (arriving with `nota-derive` in
-a later slice) remain the fast path; the conformance laws keep the two in
-agreement. This is why a `ConstructorCodec` is data, not codegen-only.
+## Open item
 
-## Decoding discipline
-
-- Alternatives are matched **purely** (no interning), so backtracking across a
-  constructor's disjoint decode forms — and across a type's constructors
-  reached by `Delegate` — is free of side effects. `Textual::unview` holds one
-  speculative `NameTransaction` across both decode and reify; either operation
-  failing leaves the NameTable byte-for-byte unchanged (law 3).
-- Recognition is boundary-first and recursive. The current expected form
-  activates an unordered sealed trigger set, universal longest-complete-match
-  is applied only within that set, and a delimited form discovers its complete
-  outside boundary before any expected child is interpreted. There is no
-  preliminary token stream, annotation tree, authored precedence, parser
-  callback, or second textual engine.
-- Boundary discovery is an ephemeral structural preflight over the expected
-  form. It advances one sequence position at a time, changing the active
-  trigger set when it enters a child or moves to a sibling. A trigger owned by
-  a later sibling is therefore negative-space data in the current position.
-  The preflight retains only the current form's checked source bounds; it does
-  not persist a parallel annotation tree or enter content identity.
-- Decode alternatives under one expected type share the union of their initial
-  triggers while that alternative is selected. A candidate is accepted only
-  after it reaches the enclosing terminator, a sequence trivia boundary, or end
-  of input. This preserves structural disjointness without making alternatives'
-  declaration order semantic.
-- A delimited form carries its boundary trigger. The table seal derives an
-  exact trigger set for every sequence position from that position's form,
-  universal trivia, and its enclosing boundary/FOLLOW set. It never unions
-  triggers reachable from later siblings. The shared evaluator walks those
-  sealed states outside-in until it finds the matching close, then interprets
-  children through a `TextReading` bounded to that interior. Products,
-  repetitions, applications, and failed children cannot read across that
-  bound.
-- An application is structurally preflighted before either side is interpreted:
-  its expected outside operator partitions checked head and payload bounds.
-  Operators inside a carrier or nested delimited child are inactive while that
-  child is bounded, so no semantic head decode can consume or manufacture the
-  split.
-- Safe alternative mismatch remains backtrackable. Once an expected opener is
-  matched, malformed boundary/carrier structure and bounded-child failures are
-  committed typed errors with byte ranges; they never collapse into
-  `NoAlternative`.
-- **Delegation constructs every wrapper level** and rejects transparent cycles;
-  recursion is permitted only after structure is consumed (left-recursion guard).
-- The `Text` scalar leaf and the `Float` scalar leaf share one control path: a
-  dotted raw `Application` rejoins via `Block::dotted_text`, and the expected type's
-  terminal scalar decides the parse. Wrapper depth (a `Delegate` chain) is
-  transparent.
-
-## Disjointness is conservative-safe (inverted from nota's lineage)
-
-nota's `validate_no_silent_conflicts` permits by default and rejects only
-demonstrable shadows. This crate **inverts** that: a pair of decode forms is
-accepted only when it can be *proven* that no block matches both (different block
-kinds, distinct concrete atom cases, distinct literals, distinct delimiters, or a
-provably-disjoint application position). Anything opaque (a delegate or leaf) or
-unprovable is a hard error — a constructor can never silently swallow another's
-inputs.
-
-## Deviations and flagged placements
-
-- **`StructuralValue::Delimited` does not store the delimiter.** Delimiter-only
-  table revisions preserve the StructuralValue mirror hash; structural respellings
-  move it by design (law 4). This deviates from §4.4's pre-hardening sketch, which
-  carried the delimiter in the mirror.
-- **Canonical text is emitted by the shared evaluator from sealed data.**
-  Operator, boundary, carrier, and canonical trivia spellings come from the
-  pinned token profile. The retired `Block→text` writer no longer exists.
-- **`Literal` decode needs a table-scoped lexicon resolver**
-  (`StructuralEvaluator::with_profile_and_lexicon`). The fixture universe avoids
-  `Literal` on decode paths; encode always has the caller's resolver.
-- **Directed delegation.** Expected-type positions may carry an optional closed
-  `DelegationPayload`; the first payload kind directs atom case. It is sealed into
-  table identity, participates in disjointness proof, and is enforced during
-  both decode and encode. The unused `SigilSpec`/`$` surface was retired rather
-  than kept as speculative grammar.
-- **Signature-versus-Core validation is deferred**: the proof-of-concept has no
-  Core layout to check `PositionalSignature` against, so the fixture universe
-  de-blocks the parked schema-unit question with an explicit `FIXTURE_UNIVERSE`.
-
-## Versioning
-
-Behaviour that changes a public contract, the storage/wire archive layout, or
-the table-identity pre-image must bump the relevant layout version
-(`HashDomain` layout tags) or state why none is needed. Layout 6 adds recursive
-position triggers and the canonical trivia set. Absolute digest tests lock
-every contextual hash domain so archive-image drift is a red test. Boundary
-regions are ephemeral UTF-8-checked cursor state and are not archived; this
-correction therefore leaves the layout-6 table and layout-1 value pre-images
-unchanged.
+Conformance law 5's downstream generated-codec witness remains homeless: the
+former derive repository is frozen and no derive path is revived here. The
+shared evaluator and its conformance harness remain the one current kernel
+surface until that witness has an explicitly authorized home.

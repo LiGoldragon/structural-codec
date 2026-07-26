@@ -1,155 +1,102 @@
-//! The one trusted evaluator over the generic `StructuralValue` mirror. It SHIPS IN
-//! THE RUNTIME: a data-loaded table is executed directly, both directions, off the
-//! SAME forms — so round-trip coherence holds by construction (§4.6, Fork C settled).
-//!
-//! Decoding matches PURELY (no interning) so alternatives backtrack for free.
-//! The direct textual surface holds one speculative `NameTransaction` across
-//! decode and reify, leaving the NameTable byte-identical on either failure.
-//! Delegation constructs every wrapper level and rejects transparent cycles;
-//! recursion is permitted only after structure is consumed.
+//! The one shared evaluator over archived typed records.
 
-use name_table::{Name, NameInterner, NameResolver, NameTable, NameTransaction};
-use raw_discovery::{Atom, Block, SealedTokenProfile};
+use std::collections::BTreeMap;
 
-use crate::codec::StructuralEntry;
+use name_table::{Name, NameInterner, NameResolver, NameTable};
+use raw_discovery::{Atom, Block, Delimiter, SealedTokenProfile, Trigger};
+
 use crate::error::{DecodeError, EncodeError};
 use crate::form::{
-    CarrierLeaf, DelegationPayload, LeafCodec, ScalarLeaf, SequenceForm, StructuralForm,
+    BorrowedFieldView, FieldVisitor, LeafCodec, Position, SharedDescriptor, StructuralRule,
+    StructureRecord,
 };
-use crate::ids::ScopedEncodedTypeId;
+use crate::ids::{FieldRole, ScopedEncodedTypeId, StableRoleId};
 use crate::table::AddressedStructuralTable;
-use crate::value::{ScalarValue, StructuralValue};
+use crate::value::{FieldValue, RoleKeyedMirror, ScalarValue, StructuralValue};
 
-/// A decoded shape before interning: atoms carry their raw text so a failed
-/// alternative costs no NameTable effect. `resolve` interns the winning path.
-pub(crate) enum DecodeDraft {
-    Atom(String),
-    Scalar(ScalarValue),
-    Delimited(Vec<DecodeDraft>),
-    Application(Box<DecodeDraft>, Box<DecodeDraft>),
-    Delegated(Box<DecodeDraft>),
-    Chosen {
-        constructor: u32,
-        payload: Box<DecodeDraft>,
-    },
+struct DescriptorCollector {
+    fields: BTreeMap<StableRoleId, SharedDescriptor>,
 }
 
-impl DecodeDraft {
-    pub(crate) fn resolve(
-        self,
-        interner: &mut impl NameInterner,
-    ) -> Result<StructuralValue, name_table::NameTableError> {
-        Ok(match self {
-            Self::Atom(text) => StructuralValue::Atom(interner.intern(Name::new(text))?),
-            Self::Scalar(scalar) => StructuralValue::Scalar(scalar),
-            Self::Delimited(children) => StructuralValue::Delimited(
-                children
-                    .into_iter()
-                    .map(|child| child.resolve(interner))
-                    .collect::<Result<_, _>>()?,
-            ),
-            Self::Application(head, payload) => StructuralValue::Application(
-                Box::new(head.resolve(interner)?),
-                Box::new(payload.resolve(interner)?),
-            ),
-            Self::Delegated(inner) => {
-                StructuralValue::Delegated(Box::new(inner.resolve(interner)?))
-            }
-            Self::Chosen {
-                constructor,
-                payload,
-            } => StructuralValue::Chosen {
-                constructor,
-                payload: Box::new(payload.resolve(interner)?),
-            },
+impl FieldVisitor for DescriptorCollector {
+    fn field<Role: FieldRole>(&mut self, position: &Position<Role>) {
+        self.fields
+            .insert(position.role(), position.descriptor().clone());
+    }
+}
+
+struct DecodeState {
+    fields: RoleKeyedMirror,
+    roles: BTreeMap<StableRoleId, SharedDescriptor>,
+}
+
+impl DecodeState {
+    fn descriptor(&self, role: StableRoleId) -> Result<&SharedDescriptor, DecodeError> {
+        self.roles
+            .get(&role)
+            .ok_or(DecodeError::MissingRole { role })
+    }
+}
+
+/// The trusted evaluator. A sealed profile is mandatory even for direct `Block`
+/// execution, so a boundary is validated from its authoritative trigger rather
+/// than guessed from raw-discovery's compatibility delimiter enum.
+pub struct StructuralEvaluator<'table, Record = StructuralRule> {
+    table: &'table AddressedStructuralTable<Record>,
+    pub(crate) profile: &'table SealedTokenProfile,
+    lexicon: Option<&'table NameTable>,
+}
+
+impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
+    pub fn with_profile(
+        table: &'table AddressedStructuralTable<Record>,
+        profile: &'table SealedTokenProfile,
+    ) -> Result<Self, DecodeError> {
+        if table.token_profile_identity() != profile.identity() {
+            return Err(DecodeError::TokenProfileIdentityMismatch);
+        }
+        Ok(Self {
+            table,
+            profile,
+            lexicon: None,
         })
     }
-}
 
-/// The trusted interpreter of a table, both directions.
-pub struct StructuralEvaluator<'table> {
-    pub(crate) table: &'table AddressedStructuralTable,
-    /// Optional resolver for the table's literal keywords (needed only to decode
-    /// `Literal` forms; encoding always has the caller's resolver).
-    pub(crate) lexicon: Option<&'table dyn NameResolver>,
-    /// The separately sealed token-profile sidecar used by direct textual
-    /// recognition and emission.
-    pub(crate) profile: Option<&'table SealedTokenProfile>,
-}
-
-impl<'table> StructuralEvaluator<'table> {
-    pub fn new(table: &'table AddressedStructuralTable) -> Self {
-        Self {
-            table,
-            lexicon: None,
-            profile: None,
-        }
-    }
-
-    /// An evaluator that can also decode `Literal` forms against the table's lexicon.
-    pub fn with_lexicon(
-        table: &'table AddressedStructuralTable,
-        lexicon: &'table dyn NameResolver,
-    ) -> Self {
-        Self {
-            table,
-            lexicon: Some(lexicon),
-            profile: None,
-        }
-    }
-
-    /// The shared evaluator bound to the exact token profile pinned by the
-    /// table. Text is never recognized without this sidecar.
-    pub fn with_profile(
-        table: &'table AddressedStructuralTable,
-        profile: &'table SealedTokenProfile,
-    ) -> Self {
-        Self {
-            table,
-            lexicon: None,
-            profile: Some(profile),
-        }
-    }
-
-    /// The shared evaluator with both the exact token profile and a literal
-    /// lexicon.
     pub fn with_profile_and_lexicon(
-        table: &'table AddressedStructuralTable,
+        table: &'table AddressedStructuralTable<Record>,
         profile: &'table SealedTokenProfile,
-        lexicon: &'table dyn NameResolver,
-    ) -> Self {
-        Self {
-            table,
-            lexicon: Some(lexicon),
-            profile: Some(profile),
-        }
+        lexicon: &'table NameTable,
+    ) -> Result<Self, DecodeError> {
+        let mut evaluator = Self::with_profile(table, profile)?;
+        evaluator.lexicon = Some(lexicon);
+        Ok(evaluator)
     }
 
-    // ===== decode =====
-
-    /// Text tree + expected type → structural value. The expected type limits the
-    /// lookup; the input never selects its own type. Interning is atomic: on failure
-    /// the NameTable is unchanged.
     pub fn decode(
         &self,
         expected: ScopedEncodedTypeId,
         block: &Block,
         names: &mut NameTable,
     ) -> Result<StructuralValue, DecodeError> {
-        names.try_intern(|transaction: &mut NameTransaction<'_>| {
-            let draft = self.match_type(expected, block, &[])?;
-            draft.resolve(transaction).map_err(DecodeError::from)
-        })
+        names.try_intern(|transaction| self.decode_with_interner(expected, block, transaction))
     }
 
-    /// Decode `block` under `expected`, trying each constructor's disjoint decode
-    /// forms. `chain` carries the transparent-delegation path for cycle detection.
-    fn match_type(
+    pub fn decode_with_interner(
         &self,
         expected: ScopedEncodedTypeId,
         block: &Block,
+        interner: &mut impl NameInterner,
+    ) -> Result<StructuralValue, DecodeError> {
+        self.decode_type(expected, block, interner, &[])
+    }
+
+    fn decode_type(
+        &self,
+        expected: ScopedEncodedTypeId,
+        block: &Block,
+        interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
-    ) -> Result<DecodeDraft, DecodeError> {
+    ) -> Result<StructuralValue, DecodeError> {
         if chain.contains(&expected) {
             return Err(DecodeError::DelegationCycle(expected));
         }
@@ -157,20 +104,16 @@ impl<'table> StructuralEvaluator<'table> {
             .table
             .entry(expected)
             .ok_or(DecodeError::UnknownType(expected))?;
-        let mut child_chain = chain.to_vec();
-        child_chain.push(expected);
-
-        for codec in &entry.constructors {
-            for form in &codec.decode_forms {
-                match self.match_form(form, block, &child_chain) {
-                    Ok(draft) => {
-                        return Ok(DecodeDraft::Chosen {
-                            constructor: codec.constructor.constructor,
-                            payload: Box::new(draft),
-                        });
-                    }
-                    Err(DecodeError::MissingLexicon) => return Err(DecodeError::MissingLexicon),
-                    Err(_) => {}
+        let mut next_chain = chain.to_vec();
+        next_chain.push(expected);
+        for codec in entry.constructors() {
+            for accepted in codec.decode_forms() {
+                let mut state = Self::state_for(accepted.rule());
+                let root = accepted.rule().root_role();
+                match self.decode_role(root, block, &mut state, interner, &next_chain) {
+                    Ok(_) => return Ok(StructuralValue::new(codec.constructor(), state.fields)),
+                    Err(error) if error.is_structural_non_match() => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -179,189 +122,353 @@ impl<'table> StructuralEvaluator<'table> {
         })
     }
 
-    fn match_form(
+    fn state_for(rule: &Record) -> DecodeState {
+        let mut collector = DescriptorCollector {
+            fields: BTreeMap::new(),
+        };
+        rule.fields().expose(&mut collector);
+        DecodeState {
+            fields: RoleKeyedMirror::default(),
+            roles: collector.fields,
+        }
+    }
+
+    fn decode_role(
         &self,
-        form: &StructuralForm,
+        role: StableRoleId,
         block: &Block,
+        state: &mut DecodeState,
+        interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
-    ) -> Result<DecodeDraft, DecodeError> {
-        match form {
-            StructuralForm::Atom(atom_form) => {
+    ) -> Result<FieldValue, DecodeError> {
+        let descriptor = state.descriptor(role)?.clone();
+        let value = self.decode_descriptor(&descriptor, block, state, interner, chain)?;
+        state.fields.insert(role, value.clone());
+        Ok(value)
+    }
+
+    fn decode_descriptor(
+        &self,
+        descriptor: &SharedDescriptor,
+        block: &Block,
+        state: &mut DecodeState,
+        interner: &mut impl NameInterner,
+        chain: &[ScopedEncodedTypeId],
+    ) -> Result<FieldValue, DecodeError> {
+        match descriptor {
+            SharedDescriptor::Atom(atom_form) => {
                 let atom = block.atom().ok_or(DecodeError::BlockKindMismatch {
                     expected: "atom",
                     found: Self::block_kind(block),
                 })?;
-                if !atom_form.accepts_case(atom) {
+                if !atom_form.accepts(atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                Ok(DecodeDraft::Atom(atom.text().to_owned()))
+                Ok(FieldValue::Atom(interner.intern(Name::new(atom.text()))?))
             }
-
-            StructuralForm::Literal(identifier) => {
+            SharedDescriptor::Literal(identifier) => {
                 let atom = block.atom().ok_or(DecodeError::BlockKindMismatch {
                     expected: "atom",
                     found: Self::block_kind(block),
                 })?;
                 let lexicon = self.lexicon.ok_or(DecodeError::MissingLexicon)?;
-                let name = lexicon.resolve(*identifier)?;
-                if name.as_str() == atom.text() {
-                    Ok(DecodeDraft::Atom(atom.text().to_owned()))
-                } else {
-                    Err(DecodeError::LiteralMismatch)
+                if lexicon.resolve(*identifier)?.as_str() != atom.text() {
+                    return Err(DecodeError::LiteralMismatch);
                 }
+                Ok(FieldValue::Atom(*identifier))
             }
-
-            StructuralForm::Leaf(leaf) => self.match_leaf(&leaf.codec, block),
-
-            StructuralForm::Application { head, payload, .. } => {
-                let (block_head, block_payload) =
+            SharedDescriptor::Leaf(codec) => {
+                Ok(FieldValue::Scalar(self.decode_leaf(codec, block)?))
+            }
+            SharedDescriptor::Delegate { target, payload } => {
+                if let Some(payload) = payload {
+                    let atom = block
+                        .atom()
+                        .ok_or(DecodeError::DelegationPayloadMismatch { payload: *payload })?;
+                    if !payload.accepts(atom) {
+                        return Err(DecodeError::DelegationPayloadMismatch { payload: *payload });
+                    }
+                }
+                Ok(FieldValue::Delegated(Box::new(
+                    self.decode_type(*target, block, interner, chain)?,
+                )))
+            }
+            SharedDescriptor::Application { head, payload, .. } => {
+                let (head_block, payload_block) =
                     block
                         .as_application()
                         .ok_or(DecodeError::BlockKindMismatch {
                             expected: "application",
                             found: Self::block_kind(block),
                         })?;
-                Ok(DecodeDraft::Application(
-                    Box::new(self.match_form(head, block_head, &[])?),
-                    Box::new(self.match_form(payload, block_payload, &[])?),
-                ))
+                let head = self.decode_role(*head, head_block, state, interner, chain)?;
+                let payload = self.decode_role(*payload, payload_block, state, interner, chain)?;
+                Ok(FieldValue::Application {
+                    head: Box::new(head),
+                    payload: Box::new(payload),
+                })
             }
-
-            StructuralForm::Delimited {
-                delimiter,
-                sequence,
-                ..
-            } => {
-                let children =
-                    block
-                        .as_delimited(*delimiter)
-                        .ok_or(DecodeError::BlockKindMismatch {
-                            expected: delimiter.description(),
-                            found: Self::block_kind(block),
-                        })?;
-                Ok(DecodeDraft::Delimited(
-                    self.match_sequence(sequence, children)?,
-                ))
+            SharedDescriptor::Delimited { boundary, content }
+            | SharedDescriptor::ItemBoundary { boundary, content } => {
+                let children = self.boundary_children(*boundary, block)?;
+                let content =
+                    self.decode_children_role(*content, children, state, interner, chain)?;
+                Ok(FieldValue::Delimited(Box::new(content)))
             }
-
-            StructuralForm::Delegate { target, payload } => {
-                if let Some(payload) = payload {
-                    let atom = block
-                        .atom()
-                        .ok_or(DecodeError::DelegationPayloadMismatch { payload: *payload })?;
-                    if !payload.accepts_atom(atom) {
-                        return Err(DecodeError::DelegationPayloadMismatch { payload: *payload });
-                    }
-                }
-                Ok(DecodeDraft::Delegated(Box::new(
-                    self.match_type(*target, block, chain)?,
-                )))
-            }
+            SharedDescriptor::Repeated { .. } => Err(DecodeError::BlockKindMismatch {
+                expected: "repeated children",
+                found: Self::block_kind(block),
+            }),
         }
     }
 
-    fn match_sequence(
+    fn decode_children_role(
         &self,
-        sequence: &SequenceForm,
-        blocks: &[Block],
-    ) -> Result<Vec<DecodeDraft>, DecodeError> {
-        match sequence {
-            SequenceForm::Product(forms) => {
-                if forms.len() != blocks.len() {
-                    return Err(DecodeError::ProductArity {
-                        form: forms.len(),
-                        blocks: blocks.len(),
-                    });
-                }
-                forms
-                    .iter()
-                    .zip(blocks)
-                    .map(|(form, block)| self.match_form(form, block, &[]))
-                    .collect()
-            }
-            SequenceForm::Repeat {
-                minimum,
-                maximum,
-                element,
-            } => {
-                let count = blocks.len() as u64;
-                if count < *minimum || maximum.is_some_and(|top| count > top) {
-                    return Err(DecodeError::SequenceCardinality { found: count });
-                }
-                blocks
-                    .iter()
-                    .map(|block| self.match_form(element, block, &[]))
-                    .collect()
-            }
+        role: StableRoleId,
+        children: &[Block],
+        state: &mut DecodeState,
+        interner: &mut impl NameInterner,
+        chain: &[ScopedEncodedTypeId],
+    ) -> Result<FieldValue, DecodeError> {
+        let descriptor = state.descriptor(role)?.clone();
+        let SharedDescriptor::Repeated {
+            minimum,
+            maximum,
+            element,
+        } = descriptor
+        else {
+            return Err(DecodeError::MissingRole { role });
+        };
+        let found = u64::try_from(children.len()).expect("platform usize fits u64");
+        if found < minimum || maximum.is_some_and(|top| found > top) {
+            return Err(DecodeError::RepetitionCardinality { found });
         }
+        let values = children
+            .iter()
+            .map(|child| self.decode_descriptor(&element, child, state, interner, chain))
+            .collect::<Result<Vec<_>, _>>()?;
+        let value = FieldValue::Repeated(values);
+        state.fields.insert(role, value.clone());
+        Ok(value)
     }
 
-    fn match_leaf(&self, codec: &LeafCodec, block: &Block) -> Result<DecodeDraft, DecodeError> {
+    fn decode_leaf(&self, codec: &LeafCodec, block: &Block) -> Result<ScalarValue, DecodeError> {
         match codec {
-            LeafCodec::Scalar(scalar) => {
-                let value = match scalar {
-                    ScalarLeaf::Integer => {
-                        let text = block.dotted_text().ok_or(DecodeError::LeafNotFlattenable)?;
-                        ScalarValue::Integer(text.parse().map_err(
-                            |error: std::num::ParseIntError| {
-                                DecodeError::ScalarParse(error.to_string())
-                            },
-                        )?)
-                    }
-                    ScalarLeaf::Float => {
-                        let text = block.dotted_text().ok_or(DecodeError::LeafNotFlattenable)?;
-                        ScalarValue::Float(text.parse().map_err(
-                            |error: std::num::ParseFloatError| {
-                                DecodeError::ScalarParse(error.to_string())
-                            },
-                        )?)
-                    }
-                    ScalarLeaf::Text => ScalarValue::Text(Self::match_text_scalar(block)?),
-                    ScalarLeaf::Boolean => {
-                        let text = block.dotted_text().ok_or(DecodeError::LeafNotFlattenable)?;
-                        match text.as_str() {
-                            "true" => ScalarValue::Boolean(true),
-                            "false" => ScalarValue::Boolean(false),
-                            other => {
-                                return Err(DecodeError::ScalarParse(format!(
-                                    "not a boolean keyword: {other}"
-                                )));
-                            }
-                        }
-                    }
-                };
-                Ok(DecodeDraft::Scalar(value))
-            }
-            LeafCodec::Carrier(CarrierLeaf::PipeText) => match block {
-                Block::PipeText(pipe) => Ok(DecodeDraft::Scalar(ScalarValue::Text(
-                    pipe.text().to_owned(),
+            LeafCodec::Integer => block
+                .dotted_text()
+                .ok_or(DecodeError::LeafNotFlattenable)?
+                .parse()
+                .map(ScalarValue::Integer)
+                .map_err(|error: std::num::ParseIntError| {
+                    DecodeError::ScalarParse(error.to_string())
+                }),
+            LeafCodec::Float => block
+                .dotted_text()
+                .ok_or(DecodeError::LeafNotFlattenable)?
+                .parse()
+                .map(ScalarValue::Float)
+                .map_err(|error: std::num::ParseFloatError| {
+                    DecodeError::ScalarParse(error.to_string())
+                }),
+            LeafCodec::Text => match block {
+                Block::PipeText(text) => Ok(ScalarValue::Text(text.text().to_owned())),
+                _ => block
+                    .dotted_text()
+                    .map(ScalarValue::Text)
+                    .ok_or(DecodeError::LeafNotFlattenable),
+            },
+            LeafCodec::Boolean => match block.dotted_text().as_deref() {
+                Some("true") => Ok(ScalarValue::Boolean(true)),
+                Some("false") => Ok(ScalarValue::Boolean(false)),
+                Some(other) => Err(DecodeError::ScalarParse(format!(
+                    "not a boolean keyword: {other}"
                 ))),
-                other => Err(DecodeError::BlockKindMismatch {
+                None => Err(DecodeError::LeafNotFlattenable),
+            },
+            LeafCodec::PipeText => match block {
+                Block::PipeText(text) => Ok(ScalarValue::Text(text.text().to_owned())),
+                _ => Err(DecodeError::BlockKindMismatch {
                     expected: "pipe text",
-                    found: Self::block_kind(other),
+                    found: Self::block_kind(block),
                 }),
             },
             LeafCodec::Foreign(_) => Err(DecodeError::LeafNotFlattenable),
         }
     }
 
-    /// Read a text scalar under the string law: dotted atoms, a parenthesized
-    /// single-space word run, or literal-preserving pipe text.
-    fn match_text_scalar(block: &Block) -> Result<String, DecodeError> {
-        if let Some(text) = block.dotted_text() {
-            return Ok(text);
+    fn boundary_children<'block>(
+        &self,
+        boundary: raw_discovery::TriggerIdentifier,
+        block: &'block Block,
+    ) -> Result<&'block [Block], DecodeError> {
+        let definition = self.profile.definition(boundary)?;
+        let Trigger::Boundary { opening, closing } = &definition.trigger else {
+            return Err(DecodeError::BoundaryMismatch { boundary });
+        };
+        let Block::Delimited {
+            delimiter,
+            root_objects,
+        } = block
+        else {
+            return Err(DecodeError::BlockKindMismatch {
+                expected: "profile boundary",
+                found: Self::block_kind(block),
+            });
+        };
+        if delimiter.opening_text() != opening || delimiter.closing_text() != closing {
+            return Err(DecodeError::BoundaryMismatch { boundary });
         }
-        if let Some(words) = block.as_delimited(raw_discovery::Delimiter::Parenthesis) {
-            return words
-                .iter()
-                .map(Self::match_text_scalar)
-                .collect::<Result<Vec<_>, _>>()
-                .map(|words| words.join(" "));
+        Ok(root_objects)
+    }
+
+    pub fn encode<Resolver: NameResolver + ?Sized>(
+        &self,
+        expected: ScopedEncodedTypeId,
+        value: &StructuralValue,
+        resolver: &Resolver,
+    ) -> Result<Block, EncodeError> {
+        let entry = self
+            .table
+            .entry(expected)
+            .ok_or(EncodeError::UnknownType(expected))?;
+        let codec = entry
+            .constructors()
+            .iter()
+            .find(|codec| codec.constructor() == value.constructor())
+            .ok_or(EncodeError::UnknownConstructor {
+                chosen: value.constructor(),
+            })?;
+        let mut collector = DescriptorCollector {
+            fields: BTreeMap::new(),
+        };
+        codec.encode_form().fields().expose(&mut collector);
+        self.encode_role(
+            codec.encode_form().root_role(),
+            &collector.fields,
+            value.fields(),
+            resolver,
+        )
+    }
+
+    fn encode_role<Resolver: NameResolver + ?Sized>(
+        &self,
+        role: StableRoleId,
+        descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
+        mirror: &RoleKeyedMirror,
+        resolver: &Resolver,
+    ) -> Result<Block, EncodeError> {
+        let descriptor = descriptors
+            .get(&role)
+            .ok_or(EncodeError::MissingRole { role })?;
+        let value = mirror
+            .value_by_stable_role(role)
+            .ok_or(EncodeError::MissingRole { role })?;
+        self.encode_descriptor(descriptor, value, descriptors, mirror, resolver)
+    }
+
+    fn encode_descriptor<Resolver: NameResolver + ?Sized>(
+        &self,
+        descriptor: &SharedDescriptor,
+        value: &FieldValue,
+        descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
+        mirror: &RoleKeyedMirror,
+        resolver: &Resolver,
+    ) -> Result<Block, EncodeError> {
+        match (descriptor, value) {
+            (SharedDescriptor::Atom(_), FieldValue::Atom(identifier)) => Ok(Block::Atom(
+                Atom::new(resolver.resolve(*identifier)?.as_str()),
+            )),
+            (SharedDescriptor::Literal(expected), FieldValue::Atom(identifier))
+                if expected == identifier =>
+            {
+                Ok(Block::Atom(Atom::new(
+                    resolver.resolve(*identifier)?.as_str(),
+                )))
+            }
+            (SharedDescriptor::Literal(_), FieldValue::Atom(_)) => {
+                Err(EncodeError::LiteralMismatch)
+            }
+            (SharedDescriptor::Leaf(_), FieldValue::Scalar(value)) => Ok(value.render_block()),
+            (SharedDescriptor::Delegate { target, payload }, FieldValue::Delegated(value)) => {
+                let block = self.encode(*target, value, resolver)?;
+                if let Some(payload) = payload {
+                    let atom = block
+                        .atom()
+                        .ok_or(EncodeError::DelegationPayloadMismatch { payload: *payload })?;
+                    if !payload.accepts(atom) {
+                        return Err(EncodeError::DelegationPayloadMismatch { payload: *payload });
+                    }
+                }
+                Ok(block)
+            }
+            (
+                SharedDescriptor::Application { head, payload, .. },
+                FieldValue::Application { .. },
+            ) => Ok(Block::Application {
+                head: Box::new(self.encode_role(*head, descriptors, mirror, resolver)?),
+                payload: Box::new(self.encode_role(*payload, descriptors, mirror, resolver)?),
+            }),
+            (
+                SharedDescriptor::Delimited { boundary, content }
+                | SharedDescriptor::ItemBoundary { boundary, content },
+                FieldValue::Delimited(_),
+            ) => {
+                let Trigger::Boundary { opening, closing } =
+                    &self.profile.definition(*boundary)?.trigger
+                else {
+                    return Err(EncodeError::ShapeMismatch);
+                };
+                let delimiter =
+                    Self::delimiter_for(opening, closing).ok_or(EncodeError::ShapeMismatch)?;
+                Ok(Block::Delimited {
+                    delimiter,
+                    root_objects: self.encode_children_role(
+                        *content,
+                        descriptors,
+                        mirror,
+                        resolver,
+                    )?,
+                })
+            }
+            _ => Err(EncodeError::ShapeMismatch),
         }
-        if let Block::PipeText(pipe) = block {
-            return Ok(pipe.text().to_owned());
-        }
-        Err(DecodeError::LeafNotFlattenable)
+    }
+
+    fn encode_children_role<Resolver: NameResolver + ?Sized>(
+        &self,
+        role: StableRoleId,
+        descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
+        mirror: &RoleKeyedMirror,
+        resolver: &Resolver,
+    ) -> Result<Vec<Block>, EncodeError> {
+        let SharedDescriptor::Repeated { element, .. } = descriptors
+            .get(&role)
+            .ok_or(EncodeError::MissingRole { role })?
+        else {
+            return Err(EncodeError::ShapeMismatch);
+        };
+        let FieldValue::Repeated(values) = mirror
+            .value_by_stable_role(role)
+            .ok_or(EncodeError::MissingRole { role })?
+        else {
+            return Err(EncodeError::ShapeMismatch);
+        };
+        values
+            .iter()
+            .map(|value| self.encode_descriptor(element, value, descriptors, mirror, resolver))
+            .collect()
+    }
+
+    fn delimiter_for(opening: &str, closing: &str) -> Option<Delimiter> {
+        [
+            Delimiter::Parenthesis,
+            Delimiter::SquareBracket,
+            Delimiter::Brace,
+        ]
+        .into_iter()
+        .find(|delimiter| {
+            delimiter.opening_text() == opening && delimiter.closing_text() == closing
+        })
     }
 
     fn block_kind(block: &Block) -> &'static str {
@@ -372,174 +479,41 @@ impl<'table> StructuralEvaluator<'table> {
             Block::PipeText(_) => "pipe text",
         }
     }
-
-    // ===== encode =====
-
-    /// Structural value → text tree. The value's chosen constructor selects the ONE
-    /// canonical encode form, so encoding never echoes a non-canonical decode form.
-    pub fn encode<Resolver: NameResolver + ?Sized>(
-        &self,
-        expected: ScopedEncodedTypeId,
-        value: &StructuralValue,
-        resolver: &Resolver,
-    ) -> Result<Block, EncodeError> {
-        self.encode_type(expected, value, resolver)
-    }
-
-    fn encode_type<Resolver: NameResolver + ?Sized>(
-        &self,
-        expected: ScopedEncodedTypeId,
-        value: &StructuralValue,
-        resolver: &Resolver,
-    ) -> Result<Block, EncodeError> {
-        let entry: &StructuralEntry = self
-            .table
-            .entry(expected)
-            .ok_or(EncodeError::UnknownType(expected))?;
-        let (constructor, payload) = match value {
-            StructuralValue::Chosen {
-                constructor,
-                payload,
-            } => (*constructor, payload.as_ref()),
-            _ => {
-                return Err(EncodeError::ShapeMismatch(
-                    "expected a constructor-tagged value at a type boundary",
-                ));
-            }
-        };
-        let codec = entry
-            .constructors
-            .iter()
-            .find(|codec| codec.constructor.constructor == constructor)
-            .ok_or(EncodeError::ConstructorOutOfRange {
-                chosen: constructor,
-                available: entry.constructors.len(),
-            })?;
-        self.encode_form_walk(&codec.encode_form, payload, resolver)
-    }
-
-    fn encode_form_walk<Resolver: NameResolver + ?Sized>(
-        &self,
-        form: &StructuralForm,
-        value: &StructuralValue,
-        resolver: &Resolver,
-    ) -> Result<Block, EncodeError> {
-        match (form, value) {
-            (StructuralForm::Atom(_), StructuralValue::Atom(id)) => {
-                let name = resolver.resolve(*id)?;
-                Ok(Block::Atom(Atom::new(name.as_str())))
-            }
-            (StructuralForm::Literal(expected), StructuralValue::Atom(id)) => {
-                if id != expected {
-                    return Err(EncodeError::LiteralMismatch);
-                }
-                let name = resolver.resolve(*id)?;
-                Ok(Block::Atom(Atom::new(name.as_str())))
-            }
-            (StructuralForm::Leaf(_), StructuralValue::Scalar(scalar)) => Ok(scalar.render_block()),
-            (
-                StructuralForm::Application { head, payload, .. },
-                StructuralValue::Application(value_head, value_payload),
-            ) => Ok(Block::Application {
-                head: Box::new(self.encode_form_walk(head, value_head, resolver)?),
-                payload: Box::new(self.encode_form_walk(payload, value_payload, resolver)?),
-            }),
-            (
-                StructuralForm::Delimited {
-                    delimiter,
-                    sequence,
-                    ..
-                },
-                StructuralValue::Delimited(children),
-            ) => Ok(Block::Delimited {
-                delimiter: *delimiter,
-                root_objects: self.encode_sequence(sequence, children, resolver)?,
-            }),
-            (StructuralForm::Delegate { target, payload }, StructuralValue::Delegated(inner)) => {
-                let block = self.encode_type(*target, inner, resolver)?;
-                if let Some(payload) = payload
-                    && !Self::delegation_payload_accepts(*payload, &block)
-                {
-                    return Err(EncodeError::DelegationPayloadMismatch { payload: *payload });
-                }
-                Ok(block)
-            }
-            _ => Err(EncodeError::ShapeMismatch(
-                "value did not fit the canonical encode form",
-            )),
-        }
-    }
-
-    fn delegation_payload_accepts(payload: DelegationPayload, block: &Block) -> bool {
-        match block {
-            Block::Atom(atom) => payload.accepts_atom(atom),
-            Block::Delimited { .. } | Block::Application { .. } | Block::PipeText(_) => false,
-        }
-    }
-
-    fn encode_sequence<Resolver: NameResolver + ?Sized>(
-        &self,
-        sequence: &SequenceForm,
-        children: &[StructuralValue],
-        resolver: &Resolver,
-    ) -> Result<Vec<Block>, EncodeError> {
-        match sequence {
-            SequenceForm::Product(forms) => {
-                if forms.len() != children.len() {
-                    return Err(EncodeError::ShapeMismatch(
-                        "product arity did not match the value's children",
-                    ));
-                }
-                forms
-                    .iter()
-                    .zip(children)
-                    .map(|(form, child)| self.encode_form_walk(form, child, resolver))
-                    .collect()
-            }
-            SequenceForm::Repeat { element, .. } => children
-                .iter()
-                .map(|child| self.encode_form_walk(element, child, resolver))
-                .collect(),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use name_table::{IdentifierNamespace, Name};
+
     use super::*;
 
-    use name_table::{IdentifierNamespace, Name, NameTable};
-    use raw_discovery::Recognizer;
-
-    use crate::fixture::FixtureBuilder;
-
-    fn atom_block(source: &str) -> Block {
-        Recognizer::standard()
-            .recognize(source)
-            .expect("recognized atom")
-            .root_object_at(0)
-            .expect("root atom")
-            .clone()
-    }
-
     #[test]
-    fn literal_match_distinguishes_missing_lexicon_from_spelling_mismatch() {
-        let table = FixtureBuilder::new().build().expect("fixture table");
-        let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
-        let literal = lexicon
-            .intern(Name::new("ExpectedLiteral"))
-            .expect("literal spelling");
-        let form = StructuralForm::Literal(literal);
-        let expected = atom_block("ExpectedLiteral");
-        let mismatched = atom_block("DifferentLiteral");
+    fn literal_without_lexicon_is_not_collapsed_into_alternative_failure() {
+        let table = crate::fixture::FixtureBuilder::new()
+            .build()
+            .expect("fixture table seals");
+        let profile = crate::fixture::FixtureBuilder::token_profile();
+        let evaluator = StructuralEvaluator::with_profile(&table, &profile)
+            .expect("the profile is pinned to the table");
+        let mut literal_names = NameTable::new(IdentifierNamespace::Fixture);
+        let literal = literal_names
+            .intern(Name::new("reserved"))
+            .expect("literal allocation");
+        let mut decode_names = NameTable::new(IdentifierNamespace::Fixture);
+        let mut state = DecodeState {
+            fields: RoleKeyedMirror::default(),
+            roles: BTreeMap::new(),
+        };
 
         assert!(matches!(
-            StructuralEvaluator::new(&table).match_form(&form, &expected, &[]),
+            evaluator.decode_descriptor(
+                &SharedDescriptor::Literal(literal),
+                &Block::Atom(Atom::new("reserved")),
+                &mut state,
+                &mut decode_names,
+                &[],
+            ),
             Err(DecodeError::MissingLexicon)
-        ));
-        assert!(matches!(
-            StructuralEvaluator::with_lexicon(&table, &lexicon).match_form(&form, &mismatched, &[]),
-            Err(DecodeError::LiteralMismatch)
         ));
     }
 }

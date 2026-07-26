@@ -1,36 +1,42 @@
-//! # structural-codec
+//! Shared evaluation of archived, fully typed structural records.
 //!
-//! The Core-associated, bidirectional, revisioned structural-form kernel of the
-//! next-generation NOTA family, with the trusted evaluator that SHIPS IN THE
-//! RUNTIME. Dialect tables are data-loadable at runtime and executed directly, both
-//! directions, off the SAME forms — so round-trip coherence holds by construction.
+//! R3 removes fixed product vectors; R4 removes flat type and constructor ids.
+//! Tables persist actual typed records, while the evaluator's only generic result
+//! is a role-keyed mirror for manual language reification and reflection.
 //!
-//! ## The kernel / authoring split
+//! Field roles cannot be transposed: the two position types differ at compile time.
 //!
-//! [`StructuralForm`] is a minimal six-case kernel. The psyche's named authoring
-//! structs ([`authoring::ObjectSymbolPrefixedBlock`], [`authoring::DottedForm`]) live
-//! in the AUTHORING vocabulary and [`authoring::AuthoringForm::normalize`] to kernel
-//! forms before a form is ever hashed or evaluated, so the kernel stays small.
+//! ```compile_fail
+//! use structural_codec::{ApplicationHead, ApplicationPayload, Position};
+//! let payload: Position<ApplicationPayload> = todo!();
+//! let _: Position<ApplicationHead> = payload;
+//! ```
 //!
-//! ## The pieces
+//! Flat raw type ids and the old fixed-product vocabulary have no construction
+//! surface.
 //!
-//! - Identity keys: [`ids`] — universes, scoped Core-type ids, constructor ids.
-//! - Forms: [`form`] (kernel) and [`authoring`] (the normalizing surface).
-//! - Codecs: [`codec::ConstructorCodec`] (asymmetric: many disjoint decode forms, one
-//!   canonical encode form) gathered per type in [`codec::StructuralEntry`].
-//! - Table: [`table::AddressedStructuralTable`] — the external sidecar keyed by
-//!   `ScopedEncodedTypeId`, its content identity stored OUTSIDE the hashed payload and
-//!   EXCLUDED from Core value identity.
-//! - Disjointness: [`disjoint`] — conservative outer-shape validation; overlap it
-//!   cannot rule out is a hard error.
-//! - Evaluator: [`evaluator::StructuralEvaluator`] — the one trusted interpreter.
-//! - Value type: [`value::StructuralValue`] — the Core-agnostic generic structural value.
-//! - Conformance: [`conformance`] — the law-5 harness the generated codec will meet.
-//! - Fixtures: [`fixture`] — the proof-of-concept universe and the acceptance gate.
-//! - The Protos pairing: [`encoded_form`] — the encoded-form side ([`EncodedForm`] marker
-//!   plus the typed [`EncodedConversion`] layer conversion `EncodedForm<T> -> EncodedForm<X>`,
-//!   text-free) — beside [`textual_form`] — the textual interface and view ([`Textual`]
-//!   produces a first-class [`TextualForm<T>`] through the nametree and structuretree).
+//! ```compile_fail
+//! let _ = structural_codec::ScopedEncodedTypeId(7);
+//! ```
+//!
+//! ```compile_fail
+//! let _ = structural_codec::SequenceForm::Product(vec![]);
+//! ```
+//!
+//! ```compile_fail
+//! let _ = structural_codec::PositionalSignature::default();
+//! ```
+//!
+//! A target layout is derived data, not a zero-filled digest wrapper; and the
+//! closed language dimension refuses invented or wrong language ids.
+//!
+//! ```compile_fail
+//! let _ = structural_codec::TargetLayoutIdentity([0; 32]);
+//! ```
+//!
+//! ```compile_fail
+//! let _ = structural_codec::EncodedLanguage::Rust;
+//! ```
 
 pub mod authoring;
 pub mod codec;
@@ -39,7 +45,6 @@ pub mod disjoint;
 pub mod encoded_form;
 pub mod error;
 pub mod evaluator;
-pub mod fixture;
 pub mod form;
 pub mod ids;
 pub mod table;
@@ -47,23 +52,67 @@ mod text;
 pub mod textual_form;
 pub mod value;
 
-pub use codec::{ConstructorCodec, StructuralEntry};
+pub use codec::{AcceptedDecodeForm, ConstructorCodec, StructuralEntry};
 pub use conformance::{ConformanceError, ConformanceHarness, GeneratedCodec};
 pub use encoded_form::{Converted, EncodedConversion, EncodedForm};
-pub use error::{DecodeError, DisjointnessError, EncodeError, TableError};
+pub use error::{
+    AuthoringError, DecodeError, DisjointnessError, EncodeError, SingleChunkRequired, TableError,
+};
 pub use evaluator::StructuralEvaluator;
 pub use form::{
-    AtomForm, CarrierLeaf, DelegationPayload, ForeignLeafId, LeafCodec, LeafForm, ScalarLeaf,
-    SequenceForm, StructuralForm,
+    ApplicationDelimitedBody, ApplicationDelimitedFieldView, ApplicationDelimitedHead,
+    ApplicationDelimitedItems, ApplicationDelimitedRoot, ApplicationDelimitedRule, ApplicationHead,
+    ApplicationPayload, ApplicationRoot, ApplicationRule, AtomDescriptor, BorrowedFieldView,
+    DelegationPayload, FieldEnd, FieldLink, FieldVisitor, ForeignLeafId, LeafCodec, Position,
+    RuleCoproduct, RuleCoproductView, SharedDescriptor, StructuralRule, StructuralRuleView,
+    StructureRecord, UnaryRoot, UnaryRule,
 };
 pub use ids::{
-    EncodedConstructorId, EncodedUniverseId, FIXTURE_UNIVERSE, PositionalSignature,
-    ScopedEncodedTypeId,
+    DecodeFormId, EncodedConstructorId, EncodedLanguage, FieldRole, ScopedEncodedTypeId,
+    StableRoleId,
 };
 pub use raw_discovery::AtomCase;
 pub use table::{
-    AddressedStructuralTable, EncodedLayoutIdentity, LeafCodecContractId, RawProfileIdentity,
-    StructuralTableDomain, TableIdentityPayload,
+    AddressedStructuralTable, ArchivedTablePayload, FixtureVocabularyDomain, StructuralTableDomain,
+    StructuralVocabularyDomain, StructuralVocabularyIdentity, TableIdentityPayload,
+    TargetLayoutDomain, TargetLayoutIdentity,
 };
 pub use textual_form::{ChunkName, TextChunk, Textual, TextualForm};
-pub use value::{ScalarValue, StructuralValue, StructuralValueDomain};
+pub use value::{
+    FieldValue, RoleKeyedMirror, ScalarValue, StructuralValue, StructuralValueDomain,
+    StructuralValueRecord,
+};
+
+// Fixture construction and all R3/R4 acceptance cases are test-only. Keeping
+// them in the crate test build lets them use crate-private archived constructors
+// without creating a consumer-facing fixture API.
+#[cfg(test)]
+#[path = "../tests/boundary_first.rs"]
+mod boundary_first;
+#[cfg(test)]
+#[path = "../tests/conformance_harness.rs"]
+mod conformance_harness;
+#[cfg(test)]
+#[path = "../tests/disjointness.rs"]
+mod disjointness;
+#[cfg(test)]
+#[path = "../tests/encoded_form.rs"]
+mod encoded_form_tests;
+#[cfg(test)]
+#[path = "../tests/evaluator_behavior.rs"]
+mod evaluator_behavior;
+#[cfg(test)]
+#[path = "../tests/support/fixture.rs"]
+mod fixture;
+#[cfg(test)]
+#[path = "../tests/identity_locks.rs"]
+mod identity_locks;
+#[cfg(test)]
+#[path = "../tests/laws.rs"]
+mod laws;
+#[cfg(test)]
+#[path = "../tests/normalization.rs"]
+mod normalization;
+#[cfg(test)]
+#[path = "../tests/textual_evaluator.rs"]
+mod textual_evaluator;

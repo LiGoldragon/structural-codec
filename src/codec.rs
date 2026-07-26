@@ -1,69 +1,93 @@
-//! The codec unit is the Core CONSTRUCTOR, and it is ASYMMETRIC: several
-//! structurally-disjoint accepted decode forms, exactly one canonical encode form,
-//! and a positional signature that MUST equal the constructor's Core field
-//! signature (§4.6). A `StructuralEntry` gathers every constructor of one Core type.
+//! Constructor-addressed archived typed rule records.
 
-use crate::form::StructuralForm;
-use crate::ids::{EncodedConstructorId, PositionalSignature, ScopedEncodedTypeId};
+use crate::form::StructuralRule;
+use crate::ids::{DecodeFormId, EncodedConstructorId, ScopedEncodedTypeId};
 
-/// One Core constructor's codec.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-#[rkyv(
-    serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source),
-    deserialize_bounds(__D::Error: rkyv::rancor::Source),
-    bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
-)]
-pub struct ConstructorCodec {
-    pub constructor: EncodedConstructorId,
-    /// Disjoint accepted inputs, proved non-shadowing by the disjointness checker.
-    #[rkyv(omit_bounds)]
-    pub decode_forms: Vec<StructuralForm>,
-    /// The single canonical output form.
-    #[rkyv(omit_bounds)]
-    pub encode_form: StructuralForm,
-    /// Positional; must equal the constructor's Core field signature.
-    pub signature: PositionalSignature,
+pub struct AcceptedDecodeForm<Record = StructuralRule> {
+    identity: DecodeFormId,
+    rule: Record,
 }
 
-impl ConstructorCodec {
+impl<Record> AcceptedDecodeForm<Record> {
+    /// Construct one accepted decode form. Duplicate identities are refused by
+    /// table sealing within the owning constructor.
+    pub fn new(identity: DecodeFormId, rule: Record) -> Self {
+        Self { identity, rule }
+    }
+
+    pub fn identity(&self) -> DecodeFormId {
+        self.identity
+    }
+
+    pub fn rule(&self) -> &Record {
+        &self.rule
+    }
+}
+
+/// One constructor's many disjoint accepted forms and one canonical form.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct ConstructorCodec<Record = StructuralRule> {
+    constructor: EncodedConstructorId,
+    decode_forms: Vec<AcceptedDecodeForm<Record>>,
+    encode_form: Record,
+}
+
+impl<Record> ConstructorCodec<Record> {
+    /// Construct a codec under its explicit constructor identity. Sealing
+    /// verifies that identity belongs to the enclosing entry and that decode
+    /// form identities are unique.
     pub fn new(
         constructor: EncodedConstructorId,
-        decode_forms: Vec<StructuralForm>,
-        encode_form: StructuralForm,
-        signature: PositionalSignature,
+        decode_forms: Vec<AcceptedDecodeForm<Record>>,
+        encode_form: Record,
     ) -> Self {
         Self {
             constructor,
             decode_forms,
             encode_form,
-            signature,
         }
+    }
+
+    pub fn constructor(&self) -> EncodedConstructorId {
+        self.constructor
+    }
+
+    pub fn decode_forms(&self) -> &[AcceptedDecodeForm<Record>] {
+        &self.decode_forms
+    }
+
+    pub fn encode_form(&self) -> &Record {
+        &self.encode_form
     }
 }
 
-/// Every constructor codec for one Core type, keyed on decode by the expected type.
+/// Every constructor codec for one encoded type. Constructor identities, not
+/// vector order, choose the canonical encoder.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-#[rkyv(
-    serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source),
-    deserialize_bounds(__D::Error: rkyv::rancor::Source),
-    bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
-)]
-pub struct StructuralEntry {
-    pub core_type: ScopedEncodedTypeId,
-    #[rkyv(omit_bounds)]
-    pub constructors: Vec<ConstructorCodec>,
+pub struct StructuralEntry<Record = StructuralRule> {
+    encoded_type: ScopedEncodedTypeId,
+    constructors: Vec<ConstructorCodec<Record>>,
 }
 
-impl StructuralEntry {
-    pub fn new(core_type: ScopedEncodedTypeId, constructors: Vec<ConstructorCodec>) -> Self {
+impl<Record> StructuralEntry<Record> {
+    /// Construct all codecs for one encoded type. The table seal is the
+    /// uniqueness and disjointness boundary for this collection.
+    pub fn new(
+        encoded_type: ScopedEncodedTypeId,
+        constructors: Vec<ConstructorCodec<Record>>,
+    ) -> Self {
         Self {
-            core_type,
+            encoded_type,
             constructors,
         }
     }
 
-    /// The constructor codec at a decode-chosen index.
-    pub fn constructor_at(&self, index: usize) -> Option<&ConstructorCodec> {
-        self.constructors.get(index)
+    pub fn encoded_type(&self) -> ScopedEncodedTypeId {
+        self.encoded_type
+    }
+
+    pub fn constructors(&self) -> &[ConstructorCodec<Record>] {
+        &self.constructors
     }
 }

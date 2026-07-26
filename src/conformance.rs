@@ -1,16 +1,19 @@
 //! Law 5 scaffolding: the conformance contract between the trusted evaluator and a
-//! future generated codec (arriving with `nota-derive` in a later slice). The
-//! `GeneratedCodec` trait is the shape the generated side will implement; the
+//! future downstream codec. The `GeneratedCodec` trait is the shape the generated
+//! or independently authored side will implement; the
 //! `ConformanceHarness` exercises it against the evaluator and asserts agreement on
 //! the encoded value, the NameTable delta, the canonical output, and the typed-error
 //! decision. TODAY the evaluator is the sole implementation — this trait has no
 //! generated implementor yet, so the harness is compiled-but-dormant scaffolding.
+//! Its downstream witness remains homeless while the former derive repository is
+//! frozen; this crate does not revive a derive path.
 
 use name_table::{IdentifierNamespace, NameResolver, NameTable, NameTableError};
-use raw_discovery::Block;
+use raw_discovery::{Block, SealedTokenProfile};
 
 use crate::error::{DecodeError, EncodeError};
 use crate::evaluator::StructuralEvaluator;
+use crate::form::{StructuralRule, StructureRecord};
 use crate::ids::ScopedEncodedTypeId;
 use crate::table::AddressedStructuralTable;
 use crate::value::StructuralValue;
@@ -21,7 +24,7 @@ pub trait GeneratedCodec: Sized {
     const CORE_TYPE: ScopedEncodedTypeId;
 
     fn decode(block: &Block, names: &mut NameTable) -> Result<Self, DecodeError>;
-    fn encode(&self, resolver: &dyn NameResolver) -> Result<Block, EncodeError>;
+    fn encode<Resolver: NameResolver>(&self, resolver: &Resolver) -> Result<Block, EncodeError>;
     fn to_structural(&self) -> StructuralValue;
 }
 
@@ -43,17 +46,24 @@ pub enum ConformanceError {
 }
 
 /// Runs the conformance contract for one expected type over a fixture set.
-pub struct ConformanceHarness<'table> {
-    evaluator: StructuralEvaluator<'table>,
+pub struct ConformanceHarness<'table, Record = StructuralRule>
+where
+    Record: StructureRecord,
+{
+    evaluator: StructuralEvaluator<'table, Record>,
     expected: ScopedEncodedTypeId,
 }
 
-impl<'table> ConformanceHarness<'table> {
-    pub fn new(table: &'table AddressedStructuralTable, expected: ScopedEncodedTypeId) -> Self {
-        Self {
-            evaluator: StructuralEvaluator::new(table),
+impl<'table, Record: StructureRecord> ConformanceHarness<'table, Record> {
+    pub fn new(
+        table: &'table AddressedStructuralTable<Record>,
+        profile: &'table SealedTokenProfile,
+        expected: ScopedEncodedTypeId,
+    ) -> Result<Self, DecodeError> {
+        Ok(Self {
+            evaluator: StructuralEvaluator::with_profile(table, profile)?,
             expected,
-        }
+        })
     }
 
     /// Assert the generated codec `T` agrees with the evaluator on every fixture.

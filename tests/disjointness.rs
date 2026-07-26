@@ -1,722 +1,776 @@
-//! The conservative disjointness checker: accepts a pair of decode forms only when
-//! it can PROVE no block matches both; unprovable overlap is a hard error.
+//! The conservative checker accepts a table only when every pair of accepted
+//! forms has a proof. These are the primitive-kernel corpus, ported onto the
+//! archived R3 typed records rather than a spelling-equality substitute.
 
 use std::collections::BTreeMap;
 
-use name_table::{IdentifierNamespace, Name, NameTable};
-use raw_discovery::{Delimiter, Recognizer, TriggerSet};
-use structural_codec::fixture::{
-    APPLICATION_OPERATOR, BRACE_BOUNDARY, COMMENT_TRIVIA, FIELD, FixtureBuilder, WHITESPACE_TRIVIA,
-};
-use structural_codec::{
-    AddressedStructuralTable, AtomCase, AtomForm, ConstructorCodec, DecodeError, DelegationPayload,
-    EncodeError, EncodedConstructorId, EncodedLayoutIdentity, PositionalSignature,
-    RawProfileIdentity, ScopedEncodedTypeId, StructuralEntry, StructuralEvaluator, StructuralForm,
-    StructuralValue, TableError, TableIdentityPayload,
+use name_table::{IdentifierNamespace, Name, NameTable, NameTableError};
+use raw_discovery::{Recognizer, TriggerSet};
+
+use crate::fixture::{APPLICATION_OPERATOR, BRACE_BOUNDARY, COMMENT_TRIVIA, WHITESPACE_TRIVIA};
+use crate::{
+    AcceptedDecodeForm, AddressedStructuralTable, ApplicationDelimitedRule, ApplicationRule,
+    AtomCase, AtomDescriptor, ConstructorCodec, DecodeError, DecodeFormId, DelegationPayload,
+    DisjointnessError, EncodeError, EncodedConstructorId, EncodedLanguage, FieldValue,
+    RoleKeyedMirror, ScopedEncodedTypeId, SharedDescriptor, StructuralEntry, StructuralEvaluator,
+    StructuralRule, StructuralValue, StructuralVocabularyIdentity, TableError,
+    TableIdentityPayload, TargetLayoutIdentity, UnaryRoot, UnaryRule,
 };
 
-fn entry_with_forms(forms: Vec<StructuralForm>) -> StructuralEntry {
-    let core_type = ScopedEncodedTypeId::fixture(100);
-    let constructors = forms
-        .into_iter()
-        .enumerate()
-        .map(|(index, form)| {
-            ConstructorCodec::new(
-                EncodedConstructorId::new(core_type, index as u32),
-                vec![form.clone()],
-                form,
-                PositionalSignature::default(),
-            )
-        })
-        .collect();
-    StructuralEntry::new(core_type, constructors)
+const TYPE: ScopedEncodedTypeId = ScopedEncodedTypeId::schema(0xf100);
+
+fn unary(descriptor: SharedDescriptor) -> StructuralRule {
+    StructuralRule::Unary(UnaryRule::new(descriptor).expect("non-zero built-in role"))
 }
 
-fn sealed_table(entry: StructuralEntry) -> Result<AddressedStructuralTable, TableError> {
-    sealed_entries(BTreeMap::from([(entry.core_type, entry)]))
+fn application(head: SharedDescriptor, payload: SharedDescriptor) -> StructuralRule {
+    StructuralRule::Application(
+        ApplicationRule::new(APPLICATION_OPERATOR, head, payload).expect("built-in roles"),
+    )
 }
 
-fn sealed_entries(
-    entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry>,
+fn application_delimited(head: SharedDescriptor) -> StructuralRule {
+    StructuralRule::ApplicationDelimited(
+        ApplicationDelimitedRule::new(
+            APPLICATION_OPERATOR,
+            BRACE_BOUNDARY,
+            head,
+            SharedDescriptor::Atom(AtomDescriptor::any_case()),
+            0,
+            None,
+        )
+        .expect("built-in roles"),
+    )
+}
+
+fn codec(
+    type_id: ScopedEncodedTypeId,
+    local: u16,
+    forms: Vec<(u16, StructuralRule)>,
+    encode: StructuralRule,
+) -> ConstructorCodec {
+    ConstructorCodec::new(
+        EncodedConstructorId::under(type_id, local),
+        forms
+            .into_iter()
+            .map(|(identity, rule)| AcceptedDecodeForm::new(DecodeFormId::new(identity), rule))
+            .collect(),
+        encode,
+    )
+}
+
+fn entry(type_id: ScopedEncodedTypeId, codecs: Vec<ConstructorCodec>) -> StructuralEntry {
+    StructuralEntry::new(type_id, codecs)
+}
+
+fn seal_entries(
+    entries: impl IntoIterator<Item = StructuralEntry>,
 ) -> Result<AddressedStructuralTable, TableError> {
-    let profile = FixtureBuilder::token_profile();
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let entries = entries
+        .into_iter()
+        .map(|entry| (entry.encoded_type(), entry))
+        .collect();
     AddressedStructuralTable::seal(
-        TableIdentityPayload {
-            core_universe: structural_codec::FIXTURE_UNIVERSE,
-            core_layout_identity: EncodedLayoutIdentity([0; 32]),
-            raw_profile_identity: RawProfileIdentity::from_profile(&profile),
-            trivia_triggers: TriggerSet::new(vec![WHITESPACE_TRIVIA, COMMENT_TRIVIA]),
-            leaf_codec_contracts: Vec::new(),
+        TableIdentityPayload::new(
+            EncodedLanguage::Schema,
+            TargetLayoutIdentity::derive(b"disjointness typed-record layout"),
+            profile.identity(),
+            StructuralVocabularyIdentity::fixture(b"disjointness typed-record vocabulary"),
+            TriggerSet::new(vec![WHITESPACE_TRIVIA, COMMENT_TRIVIA]),
             entries,
-        },
+        ),
         &profile,
     )
 }
 
-fn chosen_constructor(value: StructuralValue) -> u32 {
-    let StructuralValue::Chosen { constructor, .. } = value else {
-        panic!("expected a constructor-tagged value");
-    };
-    constructor
+fn seal_entry(entry: StructuralEntry) -> Result<AddressedStructuralTable, TableError> {
+    seal_entries([entry])
 }
 
-/// The `Field` entry has exactly one bare-type constructor; the banned named
-/// alternative cannot reappear as a second accepted decode form.
+fn atom(case: AtomCase) -> StructuralRule {
+    unary(SharedDescriptor::Atom(AtomDescriptor::with_case(case)))
+}
+
+fn atom_any() -> StructuralRule {
+    unary(SharedDescriptor::Atom(AtomDescriptor::any_case()))
+}
+
+fn one_constructor(type_id: ScopedEncodedTypeId, rule: StructuralRule) -> StructuralEntry {
+    entry(
+        type_id,
+        vec![codec(type_id, 1, vec![(1, rule.clone())], rule)],
+    )
+}
+
+fn single_block(source: &str) -> raw_discovery::Block {
+    Recognizer::standard()
+        .recognize(source)
+        .expect("recognized source")
+        .root_object_at(0)
+        .expect("one root")
+        .clone()
+}
+
 #[test]
 fn field_entry_is_the_sole_elided_constructor() {
-    let table = FixtureBuilder::new().build().expect("seal");
-    table
-        .validate_disjoint()
-        .expect("the whole fixture table validates");
-
-    let field = table.entry(FIELD).expect("field entry");
-    assert_eq!(
-        field.constructors.len(),
-        1,
-        "only the elided field form remains"
-    );
-    assert_eq!(field.constructors[0].decode_forms.len(), 1);
-    assert_eq!(
-        field.constructors[0].encode_form,
-        StructuralForm::pascal_atom()
-    );
+    let table = crate::fixture::FixtureBuilder::new()
+        .build()
+        .expect("fixture seals");
+    let field = table.entry(crate::fixture::FIELD).expect("field");
+    assert_eq!(field.constructors().len(), 1);
+    assert_eq!(field.constructors()[0].decode_forms().len(), 1);
 }
 
-/// Two atoms of DIFFERENT concrete case are provably disjoint.
 #[test]
-fn distinct_atom_cases_are_disjoint() {
-    let entry = entry_with_forms(vec![
-        StructuralForm::Atom(AtomForm::with_case(AtomCase::PascalCase)),
-        StructuralForm::Atom(AtomForm::with_case(AtomCase::CamelCase)),
-    ]);
-    entry.validate_disjoint().expect("distinct cases disjoint");
-}
-
-/// Two atoms of the SAME case overlap — the checker cannot prove them distinct, so it
-/// errors (conservative-safe).
-#[test]
-fn identical_atom_cases_are_rejected() {
-    let entry = entry_with_forms(vec![
-        StructuralForm::Atom(AtomForm::with_case(AtomCase::PascalCase)),
-        StructuralForm::Atom(AtomForm::with_case(AtomCase::PascalCase)),
-    ]);
-    assert!(
-        entry.validate_disjoint().is_err(),
-        "overlapping atom cases must be rejected"
+fn distinct_atom_cases_are_disjoint_and_identical_cases_are_rejected() {
+    let distinct = entry(
+        TYPE,
+        vec![codec(
+            TYPE,
+            1,
+            vec![
+                (1, atom(AtomCase::PascalCase)),
+                (2, atom(AtomCase::CamelCase)),
+            ],
+            atom(AtomCase::PascalCase),
+        )],
     );
-}
+    seal_entry(distinct).expect("distinct cases prove disjoint");
 
-/// Delegate forms are opaque — their matchable block kind is unknown — so a pair of
-/// them can never be proven disjoint and is rejected.
-#[test]
-fn delegate_forms_are_conservatively_rejected() {
-    let entry = entry_with_forms(vec![
-        StructuralForm::delegate(ScopedEncodedTypeId::fixture(200)),
-        StructuralForm::delegate(ScopedEncodedTypeId::fixture(201)),
-    ]);
-    assert!(
-        entry.validate_disjoint().is_err(),
-        "opaque delegate forms must be conservatively rejected"
+    let overlap = entry(
+        TYPE,
+        vec![codec(
+            TYPE,
+            1,
+            vec![
+                (1, atom(AtomCase::PascalCase)),
+                (2, atom(AtomCase::PascalCase)),
+            ],
+            atom(AtomCase::PascalCase),
+        )],
     );
-}
-
-/// An unguarded self-delegate cycle is rejected at seal time as a typed structural
-/// failure rather than recursing until the process aborts.
-#[test]
-fn seal_rejects_self_delegate_cycle_with_typed_failure() {
-    let recursive = ScopedEncodedTypeId::fixture(210);
-    let delegate = StructuralForm::delegate(recursive);
-    let delimited = StructuralForm::Delimited {
-        boundary: BRACE_BOUNDARY,
-        delimiter: Delimiter::Brace,
-        sequence: structural_codec::SequenceForm::zero_or_more(StructuralForm::pascal_atom()),
-    };
-    let entry = StructuralEntry::new(
-        recursive,
-        vec![
-            ConstructorCodec::new(
-                EncodedConstructorId::new(recursive, 0),
-                vec![delegate.clone()],
-                delegate,
-                PositionalSignature::default(),
-            ),
-            ConstructorCodec::new(
-                EncodedConstructorId::new(recursive, 1),
-                vec![delimited.clone()],
-                delimited,
-                PositionalSignature::default(),
-            ),
-        ],
-    );
-
-    let Err(TableError::Disjointness(error)) = sealed_table(entry) else {
-        panic!("an unguarded self-delegate cycle must fail sealing");
-    };
     assert!(matches!(
-        error,
-        structural_codec::DisjointnessError::DelegateExpansionCycle {
-            core_type,
-            first: 0,
-            second: 1,
-            reentered,
-        } if core_type == recursive && reentered == recursive
-    ));
-
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&error).expect("archive typed failure");
-    let restored =
-        rkyv::from_bytes::<structural_codec::DisjointnessError, rkyv::rancor::Error>(&bytes)
-            .expect("restore typed failure");
-    assert!(matches!(
-        restored,
-        structural_codec::DisjointnessError::DelegateExpansionCycle {
-            core_type,
-            first: 0,
-            second: 1,
-            reentered,
-        } if core_type == recursive && reentered == recursive
-    ));
-}
-
-/// A mutual unguarded delegate cycle also returns the exact typed seal failure.
-#[test]
-fn seal_rejects_mutual_delegate_cycle_with_typed_failure() {
-    let outer = ScopedEncodedTypeId::fixture(220);
-    let left = ScopedEncodedTypeId::fixture(221);
-    let right = ScopedEncodedTypeId::fixture(222);
-    let single_delegate = |core_type, target| {
-        let delegate = StructuralForm::delegate(target);
-        StructuralEntry::new(
-            core_type,
-            vec![ConstructorCodec::new(
-                EncodedConstructorId::new(core_type, 0),
-                vec![delegate.clone()],
-                delegate,
-                PositionalSignature::default(),
-            )],
-        )
-    };
-    let outer_delegate = StructuralForm::delegate(left);
-    let outer_delimited = StructuralForm::Delimited {
-        boundary: BRACE_BOUNDARY,
-        delimiter: Delimiter::Brace,
-        sequence: structural_codec::SequenceForm::zero_or_more(StructuralForm::pascal_atom()),
-    };
-    let outer_entry = StructuralEntry::new(
-        outer,
-        vec![
-            ConstructorCodec::new(
-                EncodedConstructorId::new(outer, 0),
-                vec![outer_delegate.clone()],
-                outer_delegate,
-                PositionalSignature::default(),
-            ),
-            ConstructorCodec::new(
-                EncodedConstructorId::new(outer, 1),
-                vec![outer_delimited.clone()],
-                outer_delimited,
-                PositionalSignature::default(),
-            ),
-        ],
-    );
-
-    assert!(matches!(
-        sealed_entries(BTreeMap::from([
-            (outer, outer_entry),
-            (left, single_delegate(left, right)),
-            (right, single_delegate(right, left)),
-        ])),
+        seal_entry(overlap),
         Err(TableError::Disjointness(
-            structural_codec::DisjointnessError::DelegateExpansionCycle {
-                core_type,
-                first: 0,
-                second: 1,
-                reentered,
-            }
-        )) if core_type == outer && reentered == left
+            DisjointnessError::NotProvablyDisjoint { .. }
+        ))
     ));
 }
 
-/// Guarded recursion remains valid: the distinct application heads prove separation
-/// before either recursive payload needs expansion.
 #[test]
-fn seal_preserves_guarded_recursive_alternatives() {
-    let recursive = ScopedEncodedTypeId::fixture(230);
-    let pascal = StructuralForm::application(
-        APPLICATION_OPERATOR,
-        StructuralForm::pascal_atom(),
-        StructuralForm::delegate(recursive),
-    );
-    let camel = StructuralForm::application(
-        APPLICATION_OPERATOR,
-        StructuralForm::camel_atom(),
-        StructuralForm::delegate(recursive),
-    );
-    let entry = StructuralEntry::new(
-        recursive,
+fn bare_delegate_forms_remain_conservative_without_a_table() {
+    let left = ScopedEncodedTypeId::schema(0xf101);
+    let right = ScopedEncodedTypeId::schema(0xf102);
+    let delegated = entry(
+        TYPE,
         vec![
-            ConstructorCodec::new(
-                EncodedConstructorId::new(recursive, 0),
-                vec![pascal.clone()],
-                pascal,
-                PositionalSignature::default(),
+            codec(
+                TYPE,
+                1,
+                vec![(
+                    1,
+                    unary(SharedDescriptor::Delegate {
+                        target: left,
+                        payload: None,
+                    }),
+                )],
+                unary(SharedDescriptor::Delegate {
+                    target: left,
+                    payload: None,
+                }),
             ),
-            ConstructorCodec::new(
-                EncodedConstructorId::new(recursive, 1),
-                vec![camel.clone()],
-                camel,
-                PositionalSignature::default(),
+            codec(
+                TYPE,
+                2,
+                vec![(
+                    1,
+                    unary(SharedDescriptor::Delegate {
+                        target: right,
+                        payload: None,
+                    }),
+                )],
+                unary(SharedDescriptor::Delegate {
+                    target: right,
+                    payload: None,
+                }),
             ),
         ],
     );
-
-    sealed_table(entry).expect("guarded recursion seals through its distinct heads");
-}
-
-/// An atom versus an application of a distinguishing head is disjoint by block kind.
-#[test]
-fn atom_versus_application_is_disjoint() {
-    let entry = entry_with_forms(vec![
-        StructuralForm::pascal_atom(),
-        StructuralForm::application(
-            APPLICATION_OPERATOR,
-            StructuralForm::camel_atom(),
-            StructuralForm::pascal_atom(),
-        ),
-    ]);
-    entry
-        .validate_disjoint()
-        .expect("atom and application are disjoint");
+    assert!(delegated.validate_disjoint().is_err());
 }
 
 #[test]
-fn type_alternatives_share_their_initial_trigger_set() {
-    let application = StructuralForm::application(
-        APPLICATION_OPERATOR,
-        StructuralForm::pascal_atom(),
-        StructuralForm::pascal_atom(),
+fn unguarded_delegate_cycles_are_typed_seal_failures() {
+    let recursive = ScopedEncodedTypeId::schema(0xf103);
+    let self_cycle = entry(
+        recursive,
+        vec![
+            codec(
+                recursive,
+                1,
+                vec![(
+                    1,
+                    unary(SharedDescriptor::Delegate {
+                        target: recursive,
+                        payload: None,
+                    }),
+                )],
+                unary(SharedDescriptor::Delegate {
+                    target: recursive,
+                    payload: None,
+                }),
+            ),
+            codec(
+                recursive,
+                2,
+                vec![(1, atom(AtomCase::PascalCase))],
+                atom(AtomCase::PascalCase),
+            ),
+        ],
     );
-    let table = sealed_table(entry_with_forms(vec![
-        StructuralForm::Atom(AtomForm::any_case()),
-        application,
-    ]))
-    .expect("structurally distinct alternatives seal");
-    let profile = FixtureBuilder::token_profile();
-    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
-    let mut names = NameTable::new(IdentifierNamespace::Fixture);
-
-    assert_eq!(
-        chosen_constructor(
-            evaluator
-                .decode_text(ScopedEncodedTypeId::fixture(100), "Alpha.Beta", &mut names,)
-                .expect("the application trigger is active while alternatives are selected")
-        ),
-        1
-    );
-}
-
-/// Sealing is the mandatory proof boundary: no addressed table can contain an
-/// unprovable overlap.
-#[test]
-fn seal_rejects_unprovable_decode_forms() {
-    let error = sealed_table(entry_with_forms(vec![
-        StructuralForm::pascal_atom(),
-        StructuralForm::pascal_atom(),
-    ]))
-    .expect_err("two PascalCase alternatives overlap");
-    assert!(
-        matches!(error, TableError::Disjointness(_)),
-        "seal reports the typed disjointness failure"
-    );
-}
-
-/// Literal and unconstrained name-atom alternatives overlap. Sealing fails rather
-/// than trying to preserve a keyword category with lexical exclusions.
-#[test]
-fn literal_and_unconstrained_name_atom_are_rejected() {
-    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
-    let integer = lexicon
-        .intern(Name::new("Integer"))
-        .expect("intern Integer");
-    let entry = entry_with_forms(vec![
-        StructuralForm::Literal(integer),
-        StructuralForm::Atom(AtomForm::any_case()),
-    ]);
-
-    assert!(
-        sealed_table(entry).is_err(),
-        "sealing rejects literal/name-atom overlap"
-    );
-}
-
-#[test]
-fn direct_literal_decode_reports_a_missing_lexicon() {
-    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
-    let literal = lexicon
-        .intern(Name::new("ExpectedLiteral"))
-        .expect("literal spelling");
-    let table = sealed_table(entry_with_forms(vec![StructuralForm::Literal(literal)]))
-        .expect("single literal table seals");
-    let document = Recognizer::standard()
-        .recognize("ExpectedLiteral")
-        .expect("recognized literal");
-    let block = document.root_object_at(0).expect("literal root");
-    let mut names = NameTable::new(IdentifierNamespace::Fixture);
-
     assert!(matches!(
-        StructuralEvaluator::new(&table).decode(
-            ScopedEncodedTypeId::fixture(100),
-            block,
-            &mut names
+        seal_entry(self_cycle),
+        Err(TableError::Disjointness(DisjointnessError::DelegateExpansionCycle {
+            core_type,
+            reentered,
+        })) if core_type == recursive && reentered == recursive
+    ));
+
+    let outer = ScopedEncodedTypeId::schema(0xf104);
+    let left = ScopedEncodedTypeId::schema(0xf105);
+    let right = ScopedEncodedTypeId::schema(0xf106);
+    let mutual = seal_entries([
+        entry(
+            outer,
+            vec![
+                codec(
+                    outer,
+                    1,
+                    vec![(
+                        1,
+                        unary(SharedDescriptor::Delegate {
+                            target: left,
+                            payload: None,
+                        }),
+                    )],
+                    unary(SharedDescriptor::Delegate {
+                        target: left,
+                        payload: None,
+                    }),
+                ),
+                codec(
+                    outer,
+                    2,
+                    vec![(1, atom(AtomCase::PascalCase))],
+                    atom(AtomCase::PascalCase),
+                ),
+            ],
         ),
+        one_constructor(
+            left,
+            unary(SharedDescriptor::Delegate {
+                target: right,
+                payload: None,
+            }),
+        ),
+        one_constructor(
+            right,
+            unary(SharedDescriptor::Delegate {
+                target: left,
+                payload: None,
+            }),
+        ),
+    ]);
+    assert!(matches!(
+        mutual,
+        Err(TableError::Disjointness(DisjointnessError::DelegateExpansionCycle {
+            core_type,
+            reentered,
+        })) if core_type == outer && reentered == left
+    ));
+}
+
+#[test]
+fn guarded_recursion_and_block_kind_proofs_still_seal() {
+    let recursive = ScopedEncodedTypeId::schema(0xf107);
+    let pascal = application(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Delegate {
+            target: recursive,
+            payload: None,
+        },
+    );
+    let camel = application(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::CamelCase)),
+        SharedDescriptor::Delegate {
+            target: recursive,
+            payload: None,
+        },
+    );
+    seal_entry(entry(
+        recursive,
+        vec![
+            codec(recursive, 1, vec![(1, pascal.clone())], pascal),
+            codec(recursive, 2, vec![(1, camel.clone())], camel),
+        ],
+    ))
+    .expect("distinguishing heads guard recursive payloads");
+
+    seal_entry(entry(
+        TYPE,
+        vec![
+            codec(
+                TYPE,
+                1,
+                vec![(1, atom(AtomCase::PascalCase))],
+                atom(AtomCase::PascalCase),
+            ),
+            codec(
+                TYPE,
+                2,
+                vec![(
+                    1,
+                    application(
+                        SharedDescriptor::Atom(AtomDescriptor::any_case()),
+                        SharedDescriptor::Atom(AtomDescriptor::any_case()),
+                    ),
+                )],
+                application(
+                    SharedDescriptor::Atom(AtomDescriptor::any_case()),
+                    SharedDescriptor::Atom(AtomDescriptor::any_case()),
+                ),
+            ),
+        ],
+    ))
+    .expect("atom and application have disjoint outer kinds");
+}
+
+#[test]
+fn literal_and_unconstrained_atom_are_not_admitted_as_alternatives() {
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let literal = names.intern(Name::new("Integer")).expect("literal");
+    let literal_rule = unary(SharedDescriptor::Literal(literal));
+    assert!(matches!(
+        seal_entry(entry(
+            TYPE,
+            vec![
+                codec(TYPE, 1, vec![(1, literal_rule.clone())], literal_rule),
+                codec(TYPE, 2, vec![(1, atom_any())], atom_any()),
+            ],
+        )),
+        Err(TableError::Disjointness(_))
+    ));
+}
+
+#[test]
+fn literal_lexicon_causes_are_preserved_without_alternative_fallback() {
+    let mut schema_names = NameTable::new(IdentifierNamespace::Schema);
+    let missing = schema_names
+        .intern(Name::new("Missing"))
+        .expect("schema id");
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let present = lexicon.intern(Name::new("Present")).expect("fixture id");
+    let missing_rule = unary(SharedDescriptor::Literal(missing));
+    let present_rule = unary(SharedDescriptor::Literal(present));
+    let table = seal_entry(entry(
+        TYPE,
+        vec![
+            codec(TYPE, 1, vec![(1, missing_rule.clone())], missing_rule),
+            codec(TYPE, 2, vec![(1, present_rule.clone())], present_rule),
+        ],
+    ))
+    .expect("different literals are disjoint");
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let evaluator = StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon)
+        .expect("profile pin");
+    let mut decoded_names = NameTable::new(IdentifierNamespace::Fixture);
+    assert!(matches!(
+        evaluator.decode(TYPE, &single_block("Present"), &mut decoded_names),
+        Err(DecodeError::Names(NameTableError::UnknownNamespace(
+            IdentifierNamespace::Schema
+        )))
+    ));
+}
+
+#[test]
+fn missing_lexicon_and_literal_encode_mismatch_keep_their_precise_errors() {
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let expected = lexicon.intern(Name::new("Expected")).expect("expected");
+    let other = lexicon.intern(Name::new("Other")).expect("other");
+    let rule = unary(SharedDescriptor::Literal(expected));
+    let table = seal_entry(one_constructor(TYPE, rule)).expect("one literal seals");
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let without_lexicon = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    assert!(matches!(
+        without_lexicon.decode(TYPE, &single_block("Expected"), &mut names),
         Err(DecodeError::MissingLexicon)
     ));
-}
 
-#[test]
-fn canonical_literal_encode_rejects_a_different_atom() {
-    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
-    let expected = lexicon
-        .intern(Name::new("ExpectedLiteral"))
-        .expect("intern expected literal");
-    let other = lexicon
-        .intern(Name::new("OtherLiteral"))
-        .expect("intern other literal");
-    let table = sealed_table(entry_with_forms(vec![StructuralForm::Literal(expected)]))
-        .expect("single literal table seals");
-    let profile = FixtureBuilder::token_profile();
-    let evaluator = StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon);
-    let value = StructuralValue::chosen(0, StructuralValue::Atom(other));
-
-    assert!(matches!(
-        evaluator.encode(ScopedEncodedTypeId::fixture(100), &value, &lexicon),
-        Err(EncodeError::LiteralMismatch)
-    ));
-    assert!(matches!(
-        evaluator.encode_text(ScopedEncodedTypeId::fixture(100), &value, &lexicon),
-        Err(EncodeError::LiteralMismatch)
-    ));
-}
-
-/// Construction order cannot change an already-proven disjoint decode result.
-#[test]
-fn disjoint_constructor_order_does_not_change_the_chosen_identifier() {
-    let core_type = ScopedEncodedTypeId::fixture(101);
-    let atom = StructuralForm::pascal_atom();
-    let application = StructuralForm::application(
-        APPLICATION_OPERATOR,
-        StructuralForm::pascal_atom(),
-        StructuralForm::pascal_atom(),
+    let constructor = table.entry(TYPE).expect("entry").constructors()[0].constructor();
+    let mut fields = RoleKeyedMirror::default();
+    fields.insert(
+        crate::StableRoleId::for_role::<UnaryRoot>(),
+        FieldValue::Atom(other),
     );
-    let table_with_order = |forms: Vec<(u32, StructuralForm)>| {
-        let constructors = forms
-            .into_iter()
-            .map(|(constructor, form)| {
-                ConstructorCodec::new(
-                    EncodedConstructorId::new(core_type, constructor),
-                    vec![form.clone()],
-                    form,
-                    PositionalSignature::default(),
-                )
-            })
-            .collect();
-        sealed_table(StructuralEntry::new(core_type, constructors)).expect("seal")
-    };
-    let first = table_with_order(vec![(7, atom.clone()), (9, application.clone())]);
-    let second = table_with_order(vec![(9, application), (7, atom)]);
-    let block = Recognizer::standard()
-        .recognize("Integer")
-        .expect("recognize")
-        .root_object_at(0)
-        .expect("root")
-        .clone();
+    let value = StructuralValue::new(constructor, fields);
+    let with_lexicon =
+        StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon).expect("profile");
+    assert!(matches!(
+        with_lexicon.encode(TYPE, &value, &lexicon),
+        Err(EncodeError::LiteralMismatch)
+    ));
+}
 
-    for table in [&first, &second] {
+#[test]
+fn unknown_type_is_terminal_and_never_falls_through_an_alternative() {
+    let table = crate::fixture::FixtureBuilder::new()
+        .build()
+        .expect("fixture");
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
+    let unknown = ScopedEncodedTypeId::schema(0xfffe);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    assert!(matches!(
+        evaluator.decode(unknown, &single_block("Entry"), &mut names),
+        Err(DecodeError::UnknownType(actual)) if actual == unknown
+    ));
+}
+
+#[test]
+fn accepted_application_payload_non_match_falls_through_to_the_disjoint_form() {
+    let pascal = application(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+    );
+    let camel = application(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::CamelCase)),
+    );
+    let table = seal_entry(entry(
+        TYPE,
+        vec![
+            codec(TYPE, 7, vec![(1, pascal.clone())], pascal),
+            codec(TYPE, 9, vec![(1, camel.clone())], camel),
+        ],
+    ))
+    .expect("payload cases prove disjoint");
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    assert_eq!(
+        evaluator
+            .decode(TYPE, &single_block("Head.payload"), &mut names)
+            .expect("second payload alternative")
+            .constructor()
+            .local(),
+        9
+    );
+}
+
+#[test]
+fn constructor_and_form_vector_order_never_select_meaning() {
+    let application_rule = application(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+    );
+    let bare_rule = atom(AtomCase::PascalCase);
+    let make = |reverse: bool| {
+        let mut codecs = vec![
+            codec(TYPE, 7, vec![(1, bare_rule.clone())], bare_rule.clone()),
+            codec(
+                TYPE,
+                9,
+                vec![(2, application_rule.clone())],
+                application_rule.clone(),
+            ),
+        ];
+        if reverse {
+            codecs.reverse();
+        }
+        seal_entry(entry(TYPE, codecs)).expect("disjoint table")
+    };
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    for table in [make(false), make(true)] {
+        let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
         let mut names = NameTable::new(IdentifierNamespace::Fixture);
-        let value = StructuralEvaluator::new(table)
-            .decode(core_type, &block, &mut names)
-            .expect("decode bare name");
-        assert_eq!(chosen_constructor(value), 7);
+        assert_eq!(
+            evaluator
+                .decode(TYPE, &single_block("Entry"), &mut names)
+                .expect("bare alternative")
+                .constructor()
+                .local(),
+            7
+        );
     }
 }
 
-/// The table-level seal expands delegates to prove a wrapper form is disjoint from a
-/// delimited alternative, while decoding retains the delegate's constructor wrapper.
 #[test]
-fn seal_proves_disjointness_through_a_delegate() {
-    let reference = ScopedEncodedTypeId::fixture(200);
-    let declaration = ScopedEncodedTypeId::fixture(201);
-    let reference_entry = StructuralEntry::new(
-        reference,
-        vec![ConstructorCodec::new(
-            EncodedConstructorId::new(reference, 7),
-            vec![StructuralForm::pascal_atom()],
-            StructuralForm::pascal_atom(),
-            PositionalSignature::default(),
-        )],
-    );
-    let newtype = StructuralForm::application(
-        APPLICATION_OPERATOR,
-        StructuralForm::pascal_atom(),
-        StructuralForm::delegate(reference),
-    );
-    let structure = StructuralForm::application(
-        APPLICATION_OPERATOR,
-        StructuralForm::pascal_atom(),
-        StructuralForm::Delimited {
-            boundary: BRACE_BOUNDARY,
-            delimiter: Delimiter::Brace,
-            sequence: structural_codec::SequenceForm::zero_or_more(StructuralForm::pascal_atom()),
-        },
-    );
-    let declaration_entry = StructuralEntry::new(
-        declaration,
+fn delegate_expansion_preserves_directed_payload_and_wrapper_value() {
+    let target = ScopedEncodedTypeId::schema(0xf108);
+    let outer = ScopedEncodedTypeId::schema(0xf109);
+    let target_entry = one_constructor(target, atom_any());
+    let pascal_delegate = unary(SharedDescriptor::Delegate {
+        target,
+        payload: Some(DelegationPayload::AtomCase(AtomCase::PascalCase)),
+    });
+    let camel_delegate = unary(SharedDescriptor::Delegate {
+        target,
+        payload: Some(DelegationPayload::AtomCase(AtomCase::CamelCase)),
+    });
+    let table = seal_entries([
+        target_entry,
+        entry(
+            outer,
+            vec![
+                codec(
+                    outer,
+                    1,
+                    vec![(1, pascal_delegate.clone())],
+                    pascal_delegate,
+                ),
+                codec(outer, 2, vec![(1, camel_delegate.clone())], camel_delegate),
+            ],
+        ),
+    ])
+    .expect("payload constraints prove directed delegates disjoint");
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let pascal = evaluator
+        .decode(outer, &single_block("Entry"), &mut names)
+        .expect("Pascal delegate");
+    let camel = evaluator
+        .decode(outer, &single_block("entry"), &mut names)
+        .expect("camel delegate");
+    assert_eq!(pascal.constructor().local(), 1);
+    assert_eq!(camel.constructor().local(), 2);
+    assert!(matches!(
+        pascal.fields().value::<UnaryRoot>(),
+        Some(FieldValue::Delegated(inner)) if inner.constructor().type_id() == target
+    ));
+
+    let plain = entry(
+        outer,
         vec![
-            ConstructorCodec::new(
-                EncodedConstructorId::new(declaration, 0),
-                vec![newtype.clone()],
-                newtype,
-                PositionalSignature::default(),
+            codec(
+                outer,
+                1,
+                vec![(
+                    1,
+                    unary(SharedDescriptor::Delegate {
+                        target,
+                        payload: None,
+                    }),
+                )],
+                unary(SharedDescriptor::Delegate {
+                    target,
+                    payload: None,
+                }),
             ),
-            ConstructorCodec::new(
-                EncodedConstructorId::new(declaration, 1),
-                vec![structure.clone()],
-                structure,
-                PositionalSignature::default(),
+            codec(
+                outer,
+                2,
+                vec![(
+                    1,
+                    unary(SharedDescriptor::Delegate {
+                        target,
+                        payload: None,
+                    }),
+                )],
+                unary(SharedDescriptor::Delegate {
+                    target,
+                    payload: None,
+                }),
             ),
         ],
     );
-    let profile = FixtureBuilder::token_profile();
-    let table = AddressedStructuralTable::seal(
-        TableIdentityPayload {
-            core_universe: structural_codec::FIXTURE_UNIVERSE,
-            core_layout_identity: EncodedLayoutIdentity([0; 32]),
-            raw_profile_identity: RawProfileIdentity::from_profile(&profile),
-            trivia_triggers: TriggerSet::new(vec![WHITESPACE_TRIVIA, COMMENT_TRIVIA]),
-            leaf_codec_contracts: Vec::new(),
-            entries: BTreeMap::from([
-                (reference, reference_entry),
-                (declaration, declaration_entry),
-            ]),
-        },
-        &profile,
-    )
-    .expect("the delegate expands to a Pascal atom, disjoint from a brace");
-
-    let block = Recognizer::standard()
-        .recognize("Record.Target")
-        .expect("recognize")
-        .root_object_at(0)
-        .expect("root")
-        .clone();
-    let mut names = NameTable::new(IdentifierNamespace::Fixture);
-    let value = StructuralEvaluator::new(&table)
-        .decode(declaration, &block, &mut names)
-        .expect("decode newtype form");
-    let StructuralValue::Chosen { payload, .. } = value else {
-        panic!("declaration is constructor-tagged");
-    };
-    let StructuralValue::Application(_, body) = payload.as_ref() else {
-        panic!("declaration is an application");
-    };
-    assert!(
-        matches!(body.as_ref(), StructuralValue::Delegated(inner) if matches!(inner.as_ref(), StructuralValue::Chosen { constructor: 7, .. })),
-        "the evaluator retains the delegated reference constructor"
-    );
-}
-
-fn unconstrained_atom_target(target: ScopedEncodedTypeId) -> StructuralEntry {
-    let form = StructuralForm::Atom(AtomForm::any_case());
-    StructuralEntry::new(
-        target,
-        vec![ConstructorCodec::new(
-            EncodedConstructorId::new(target, 0),
-            vec![form.clone()],
-            form,
-            PositionalSignature::default(),
-        )],
-    )
-}
-
-fn directed_delegate_entry(
-    outer: ScopedEncodedTypeId,
-    target: ScopedEncodedTypeId,
-    payloads: &[DelegationPayload],
-) -> StructuralEntry {
-    StructuralEntry::new(
-        outer,
-        payloads
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(constructor, payload)| {
-                let form = StructuralForm::delegate_with_payload(target, payload);
-                ConstructorCodec::new(
-                    EncodedConstructorId::new(outer, constructor as u32),
-                    vec![form.clone()],
-                    form,
-                    PositionalSignature::new(vec![target]),
-                )
-            })
-            .collect(),
-    )
-}
-
-/// Typed payloads direct the expected-type position before the target entry is
-/// evaluated, so a case-specific delegation chooses the matching constructor.
-#[test]
-fn payload_directed_position_decodes_as_directed() {
-    let target = ScopedEncodedTypeId::fixture(250);
-    let outer = ScopedEncodedTypeId::fixture(251);
-    let table = sealed_entries(BTreeMap::from([
-        (target, unconstrained_atom_target(target)),
-        (
-            outer,
-            directed_delegate_entry(
-                outer,
-                target,
-                &[
-                    DelegationPayload::AtomCase(AtomCase::PascalCase),
-                    DelegationPayload::AtomCase(AtomCase::CamelCase),
-                ],
-            ),
-        ),
-    ]))
-    .expect("seal case-directed delegates");
-    let evaluator = StructuralEvaluator::new(&table);
-
-    let pascal = Recognizer::standard()
-        .recognize("Entry")
-        .expect("recognize Pascal atom")
-        .root_object_at(0)
-        .expect("Pascal root")
-        .clone();
-    let camel = Recognizer::standard()
-        .recognize("entry")
-        .expect("recognize camel atom")
-        .root_object_at(0)
-        .expect("camel root")
-        .clone();
-    let mut names = NameTable::new(IdentifierNamespace::Fixture);
-    assert_eq!(
-        chosen_constructor(
-            evaluator
-                .decode(outer, &pascal, &mut names)
-                .expect("Pascal decode")
-        ),
-        0
-    );
-    assert_eq!(
-        chosen_constructor(
-            evaluator
-                .decode(outer, &camel, &mut names)
-                .expect("camel decode")
-        ),
-        1
-    );
-}
-
-/// Encoding applies the same directed payload as decoding. A target value cannot
-/// print text the selected delegate would refuse on the way back in.
-#[test]
-fn payload_directed_position_rejects_nonconforming_encode() {
-    let target = ScopedEncodedTypeId::fixture(252);
-    let outer = ScopedEncodedTypeId::fixture(253);
-    let table = sealed_entries(BTreeMap::from([
-        (target, unconstrained_atom_target(target)),
-        (
-            outer,
-            directed_delegate_entry(
-                outer,
-                target,
-                &[DelegationPayload::AtomCase(AtomCase::PascalCase)],
-            ),
-        ),
-    ]))
-    .expect("seal case-directed delegate");
-    let evaluator = StructuralEvaluator::new(&table);
-    let mut names = NameTable::new(IdentifierNamespace::Fixture);
-    let identifier = names.intern(Name::new("entry")).expect("intern camel atom");
-    let value = StructuralValue::Chosen {
-        constructor: 0,
-        payload: Box::new(StructuralValue::Delegated(Box::new(
-            StructuralValue::Chosen {
-                constructor: 0,
-                payload: Box::new(StructuralValue::Atom(identifier)),
-            },
-        ))),
-    };
-
     assert!(matches!(
-        evaluator.encode(outer, &value, &names),
-        Err(EncodeError::DelegationPayloadMismatch {
-            payload: DelegationPayload::AtomCase(AtomCase::PascalCase)
-        })
+        seal_entries([one_constructor(target, atom_any()), plain]),
+        Err(TableError::Disjointness(_))
     ));
 }
 
-/// Payload bytes belong to the sealed table pre-image. A changed direction cannot
-/// retain a table identity by accident.
 #[test]
-fn changing_delegation_payload_moves_table_identity() {
-    let target = ScopedEncodedTypeId::fixture(260);
-    let outer = ScopedEncodedTypeId::fixture(261);
-    let table_for = |payload| {
-        sealed_entries(BTreeMap::from([
-            (target, unconstrained_atom_target(target)),
-            (outer, directed_delegate_entry(outer, target, &[payload])),
-        ]))
-        .expect("seal payload table")
-    };
+fn delegate_proof_reaches_a_boundary_and_payload_changes_move_table_identity() {
+    let target = ScopedEncodedTypeId::schema(0xf10a);
+    let outer = ScopedEncodedTypeId::schema(0xf10b);
+    let delegate = application(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Delegate {
+            target,
+            payload: None,
+        },
+    );
+    let boundary = application_delimited(SharedDescriptor::Atom(AtomDescriptor::with_case(
+        AtomCase::PascalCase,
+    )));
+    seal_entries([
+        one_constructor(target, atom(AtomCase::PascalCase)),
+        entry(
+            outer,
+            vec![
+                codec(outer, 1, vec![(1, delegate.clone())], delegate),
+                codec(outer, 2, vec![(1, boundary.clone())], boundary),
+            ],
+        ),
+    ])
+    .expect("delegate atom and boundary are disjoint through the shared proof");
 
-    let pascal = table_for(DelegationPayload::AtomCase(AtomCase::PascalCase));
-    let camel = table_for(DelegationPayload::AtomCase(AtomCase::CamelCase));
-    assert_ne!(pascal.identity(), camel.identity());
+    let table_for = |payload| {
+        seal_entries([
+            one_constructor(target, atom_any()),
+            entry(
+                outer,
+                vec![codec(
+                    outer,
+                    1,
+                    vec![(
+                        1,
+                        unary(SharedDescriptor::Delegate {
+                            target,
+                            payload: Some(payload),
+                        }),
+                    )],
+                    unary(SharedDescriptor::Delegate {
+                        target,
+                        payload: Some(payload),
+                    }),
+                )],
+            ),
+        ])
+        .expect("single directed delegate seals")
+    };
+    assert_ne!(
+        table_for(DelegationPayload::AtomCase(AtomCase::PascalCase)).identity(),
+        table_for(DelegationPayload::AtomCase(AtomCase::CamelCase)).identity(),
+    );
 }
 
-/// The seal proof consumes a delegate payload: without the two distinct payload
-/// constraints, these two delegates expand to the same unconstrained target and
-/// overlap; with them, the atom cases prove disjoint.
 #[test]
-fn disjointness_prover_consumes_delegation_payloads() {
-    let target = ScopedEncodedTypeId::fixture(270);
-    let outer = ScopedEncodedTypeId::fixture(271);
-    let directed = directed_delegate_entry(
-        outer,
-        target,
-        &[
-            DelegationPayload::AtomCase(AtomCase::PascalCase),
-            DelegationPayload::AtomCase(AtomCase::CamelCase),
-        ],
-    );
-    sealed_entries(BTreeMap::from([
-        (target, unconstrained_atom_target(target)),
-        (outer, directed),
-    ]))
-    .expect("payload cases prove the delegates disjoint");
+fn r4_ids_archive_as_distinct_language_variants_and_associations_are_checked() {
+    let schema = ScopedEncodedTypeId::schema(9);
+    let logos = ScopedEncodedTypeId::logos(9);
+    let nomos = ScopedEncodedTypeId::nomos(9);
+    assert_ne!(schema, logos);
+    assert_ne!(logos, nomos);
+    for identity in [schema, logos, nomos] {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&identity).expect("archive identity");
+        let restored = rkyv::from_bytes::<ScopedEncodedTypeId, rkyv::rancor::Error>(&bytes)
+            .expect("restore identity");
+        assert_eq!(restored, identity);
+    }
 
-    let plain = StructuralEntry::new(
-        outer,
+    let schema_entry = ScopedEncodedTypeId::schema(0xf10c);
+    let logos_constructor = EncodedConstructorId::under(ScopedEncodedTypeId::logos(3), 1);
+    let wrong_constructor = entry(
+        schema_entry,
+        vec![ConstructorCodec::new(
+            logos_constructor,
+            vec![AcceptedDecodeForm::new(DecodeFormId::new(1), atom_any())],
+            atom_any(),
+        )],
+    );
+    assert!(matches!(
+        seal_entry(wrong_constructor),
+        Err(TableError::ConstructorUnderWrongEntry { constructor, entry })
+            if constructor == logos_constructor && entry == schema_entry
+    ));
+
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let logos_entry = entry(
+        ScopedEncodedTypeId::logos(7),
+        vec![codec(
+            ScopedEncodedTypeId::logos(7),
+            1,
+            vec![(1, atom_any())],
+            atom_any(),
+        )],
+    );
+    assert!(matches!(
+        AddressedStructuralTable::seal(
+            TableIdentityPayload::new(
+                EncodedLanguage::Schema,
+                TargetLayoutIdentity::derive(b"cross-language table"),
+                profile.identity(),
+                StructuralVocabularyIdentity::language(b"cross-language vocabulary"),
+                TriggerSet::new(vec![]),
+                BTreeMap::from([(logos_entry.encoded_type(), logos_entry)]),
+            ),
+            &profile,
+        ),
+        Err(TableError::LanguageMismatch { table: EncodedLanguage::Schema, encoded })
+            if encoded == ScopedEncodedTypeId::logos(7)
+    ));
+}
+
+#[test]
+fn duplicate_constructor_and_decode_form_identities_are_refused_at_seal() {
+    let duplicate_constructor = EncodedConstructorId::under(TYPE, 1);
+    let constructor_duplicate = entry(
+        TYPE,
         vec![
             ConstructorCodec::new(
-                EncodedConstructorId::new(outer, 0),
-                vec![StructuralForm::delegate(target)],
-                StructuralForm::delegate(target),
-                PositionalSignature::new(vec![target]),
+                duplicate_constructor,
+                vec![AcceptedDecodeForm::new(
+                    DecodeFormId::new(1),
+                    atom(AtomCase::PascalCase),
+                )],
+                atom(AtomCase::PascalCase),
             ),
             ConstructorCodec::new(
-                EncodedConstructorId::new(outer, 1),
-                vec![StructuralForm::delegate(target)],
-                StructuralForm::delegate(target),
-                PositionalSignature::new(vec![target]),
+                duplicate_constructor,
+                vec![AcceptedDecodeForm::new(
+                    DecodeFormId::new(2),
+                    atom(AtomCase::CamelCase),
+                )],
+                atom(AtomCase::CamelCase),
             ),
         ],
     );
-    assert!(
-        sealed_entries(BTreeMap::from([
-            (target, unconstrained_atom_target(target)),
-            (outer, plain),
-        ]))
-        .is_err(),
-        "without payload direction, the same target forms overlap"
+    assert!(matches!(
+        seal_entry(constructor_duplicate),
+        Err(TableError::DuplicateConstructor { constructor, .. }) if constructor == duplicate_constructor
+    ));
+
+    let form_duplicate = entry(
+        TYPE,
+        vec![codec(
+            TYPE,
+            1,
+            vec![
+                (7, atom(AtomCase::PascalCase)),
+                (7, atom(AtomCase::CamelCase)),
+            ],
+            atom(AtomCase::PascalCase),
+        )],
+    );
+    assert!(matches!(
+        seal_entry(form_duplicate),
+        Err(TableError::DuplicateDecodeForm { form, .. }) if form == DecodeFormId::new(7)
+    ));
+}
+
+#[test]
+fn profile_trivia_completion_rewinds_before_shared_decode() {
+    let table = crate::fixture::FixtureBuilder::new()
+        .build()
+        .expect("fixture");
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+    let value = evaluator
+        .decode_text(
+            crate::fixture::COMMIT_SEQUENCE,
+            "CommitSequence.{ Integer ;; accepted trivia\n }",
+            &mut names,
+        )
+        .expect("trivia completion is rewound before direct evaluation");
+    assert_eq!(
+        evaluator
+            .encode_text(crate::fixture::COMMIT_SEQUENCE, &value, &names)
+            .expect("canonical text"),
+        "CommitSequence.{Integer}"
     );
 }

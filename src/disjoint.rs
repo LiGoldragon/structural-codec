@@ -1,295 +1,339 @@
-//! Conservative outer-shape disjointness validation. This is the lineage of nota's
-//! `validate_no_silent_conflicts`, but INVERTED to the conservative-safe direction the
-//! design demands: nota permits by default and rejects only demonstrable shadows;
-//! here a pair of accepted decode forms is accepted ONLY when it can be PROVEN that no
-//! raw block could match both. Overlap the checker cannot rule out is a validation
-//! ERROR, so a constructor can never silently swallow another's inputs.
+//! Conservative disjointness proof over shared descriptors and typed positions.
+//!
+//! The proof is deliberately stricter than the evaluator: an alternative pair
+//! seals only when a structural distinction is proved. In particular, delegate
+//! payload constraints participate in the proof and an active delegate
+//! expansion is a typed cycle failure, never a missing target.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::codec::StructuralEntry;
 use crate::error::{DisjointnessError, DisjointnessReason};
-use crate::form::StructuralForm;
-use crate::ids::ScopedEncodedTypeId;
+use crate::form::{
+    AtomDescriptor, BorrowedFieldView, DelegationPayload, FieldVisitor, Position, SharedDescriptor,
+    StructureRecord,
+};
+use crate::ids::{FieldRole, ScopedEncodedTypeId, StableRoleId};
 
-/// The discriminating outer shape of a form — the block kind it can match. Forms
-/// whose matchable kind cannot be pinned (delegates, leaves, products) are `Opaque`
-/// and never prove disjoint against anything.
-enum OuterShape<'form> {
-    /// Matches a `Block::Atom` constrained by case (`None` = any case).
-    NameAtom(Option<raw_discovery::AtomCase>),
-    /// Matches a specific interned atom.
+struct Collector {
+    fields: BTreeMap<StableRoleId, SharedDescriptor>,
+}
+
+impl FieldVisitor for Collector {
+    fn field<Role: FieldRole>(&mut self, position: &Position<Role>) {
+        self.fields
+            .insert(position.role(), position.descriptor().clone());
+    }
+}
+
+fn fields<Record: StructureRecord>(
+    rule: &Record,
+) -> (StableRoleId, BTreeMap<StableRoleId, SharedDescriptor>) {
+    let mut collector = Collector {
+        fields: BTreeMap::new(),
+    };
+    rule.fields().expose(&mut collector);
+    (rule.root_role(), collector.fields)
+}
+
+enum Outer<'a> {
+    Atom(Option<raw_discovery::AtomCase>),
     Literal(name_table::Identifier),
-    /// Matches a `Block::Application`.
-    Application(&'form StructuralForm, &'form StructuralForm),
-    /// Matches the opening of one profile-addressed boundary. The boundary
-    /// identifier, not a legacy rendered delimiter enum, is what distinguishes
-    /// direct textual alternatives.
-    Delimited(raw_discovery::TriggerIdentifier),
-    /// Matchable kind cannot be pinned — conservatively overlaps everything.
+    Application(&'a SharedDescriptor, &'a SharedDescriptor),
+    Boundary(raw_discovery::TriggerIdentifier),
     Opaque,
 }
 
-/// The active direct-delegate expansions for one proof obligation. This is a
-/// structural state (the delegated type identities), not a depth counter: re-entering
-/// an active expansion means the proof remains unresolved at the same raw block.
-#[derive(Default)]
-struct DelegateProofState {
-    active_expansions: BTreeSet<ScopedEncodedTypeId>,
-}
-
-impl StructuralForm {
-    fn outer_shape(&self) -> OuterShape<'_> {
-        match self {
-            Self::Atom(atom) => OuterShape::NameAtom(atom.case),
-            Self::Literal(identifier) => OuterShape::Literal(*identifier),
-            Self::Application { head, payload, .. } => OuterShape::Application(head, payload),
-            Self::Delimited { boundary, .. } => OuterShape::Delimited(*boundary),
-            Self::Leaf(_) | Self::Delegate { .. } => OuterShape::Opaque,
-        }
-    }
-
-    /// `Ok(())` when it is PROVEN that no raw block matches both forms; `Err(reason)`
-    /// when disjointness cannot be established (conservatively an overlap). At a
-    /// table seal, a delegate expands to every direct decode form in its target entry.
-    /// A standalone entry has no such table context, so delegates remain opaque.
-    fn prove_disjoint_from(
-        &self,
-        other: &StructuralForm,
-        entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry>>,
-        state: &mut DelegateProofState,
-    ) -> Result<(), ProofFailure> {
-        // Two directed positions can prove disjoint from their sealed payloads
-        // alone, before either transparent target needs expansion. This keeps a
-        // useful direction from being mistaken for an unguarded delegate cycle.
-        if let (
-            StructuralForm::Delegate {
-                payload: Some(left_payload),
-                ..
-            },
-            StructuralForm::Delegate {
-                payload: Some(right_payload),
-                ..
-            },
-        ) = (self, other)
-        {
-            let left_constraint = left_payload.constraint_form();
-            let right_constraint = right_payload.constraint_form();
-            if left_constraint
-                .prove_disjoint_from(&right_constraint, entries, state)
-                .is_ok()
-            {
-                return Ok(());
-            }
-        }
-
-        if let StructuralForm::Delegate { target, payload } = self {
-            let entry = entries
-                .and_then(|entries| entries.get(target))
-                .ok_or(DisjointnessReason::MissingDelegateTarget { target: *target })?;
-            if !state.active_expansions.insert(*target) {
-                return Err(ProofFailure::DelegateExpansionCycle { reentered: *target });
-            }
-            let proof = entry
-                .constructors
-                .iter()
-                .flat_map(|codec| &codec.decode_forms)
-                .try_for_each(|form| {
-                    Self::prove_directed_delegate_form_disjoint(
-                        *payload, form, other, entries, state,
-                    )
-                });
-            state.active_expansions.remove(target);
-            return proof;
-        }
-        if matches!(other, StructuralForm::Delegate { .. }) {
-            return other.prove_disjoint_from(self, entries, state);
-        }
-
-        match (self.outer_shape(), other.outer_shape()) {
-            (OuterShape::Opaque, _) | (_, OuterShape::Opaque) => {
-                Err(DisjointnessReason::OpaqueForm.into())
-            }
-
-            // Different block kinds are mutually exclusive: a block is exactly one of
-            // atom / application / delimited.
-            (OuterShape::NameAtom(_) | OuterShape::Literal(_), OuterShape::Application(_, _))
-            | (OuterShape::Application(_, _), OuterShape::NameAtom(_) | OuterShape::Literal(_)) => {
-                Ok(())
-            }
-            (OuterShape::NameAtom(_) | OuterShape::Literal(_), OuterShape::Delimited(_))
-            | (OuterShape::Delimited(_), OuterShape::NameAtom(_) | OuterShape::Literal(_)) => {
-                Ok(())
-            }
-            (OuterShape::Application(_, _), OuterShape::Delimited(_))
-            | (OuterShape::Delimited(_), OuterShape::Application(_, _)) => Ok(()),
-
-            // Two case-constrained name atoms are disjoint only when both cases are
-            // concrete and different; a `None` case accepts every atom.
-            (OuterShape::NameAtom(left_case), OuterShape::NameAtom(right_case)) => {
-                match (left_case, right_case) {
-                    (Some(left_case), Some(right_case)) if left_case != right_case => Ok(()),
-                    _ => Err(DisjointnessReason::OverlappingAtomCase.into()),
-                }
-            }
-
-            // Two literals are disjoint only when they name different keywords.
-            (OuterShape::Literal(left), OuterShape::Literal(right)) => {
-                if left == right {
-                    Err(DisjointnessReason::SameLiteral.into())
-                } else {
-                    Ok(())
-                }
-            }
-
-            // A literal may satisfy any unconstrained name atom. Grammar positions
-            // must not mix the two categories; no lexical exclusion can repair that.
-            (OuterShape::NameAtom(_), OuterShape::Literal(_))
-            | (OuterShape::Literal(_), OuterShape::NameAtom(_)) => {
-                Err(DisjointnessReason::LiteralMayMatchNameAtom.into())
-            }
-
-            // Applications are disjoint if EITHER position is provably disjoint. A
-            // guarded recursive payload is never expanded when the heads already
-            // separate the alternatives.
-            (
-                OuterShape::Application(left_head, left_payload),
-                OuterShape::Application(right_head, right_payload),
-            ) => {
-                let head_proof = left_head.prove_disjoint_from(right_head, entries, state);
-                if head_proof.is_ok() {
-                    return Ok(());
-                }
-                let payload_proof = left_payload.prove_disjoint_from(right_payload, entries, state);
-                if payload_proof.is_ok() {
-                    return Ok(());
-                }
-                match (head_proof, payload_proof) {
-                    (Err(cycle @ ProofFailure::DelegateExpansionCycle { .. }), _)
-                    | (_, Err(cycle @ ProofFailure::DelegateExpansionCycle { .. })) => Err(cycle),
-                    _ => Err(DisjointnessReason::ApplicationPositionsNotDisjoint.into()),
-                }
-            }
-
-            // Delimited forms are disjoint only when they activate distinct sealed
-            // boundary definitions. A shared boundary would need a proof over the
-            // inner sequence, which we do not attempt (conservatively an overlap).
-            (OuterShape::Delimited(left), OuterShape::Delimited(right)) => {
-                if left == right {
-                    Err(DisjointnessReason::SharedDelimiter.into())
-                } else {
-                    Ok(())
-                }
-            }
-        }
-    }
-
-    /// A directed delegation accepts the intersection of its target form and the
-    /// payload constraint. That intersection is disjoint from `other` when either
-    /// operand is disjoint from `other`, or when the payload itself excludes the
-    /// target form. Every branch is structural; no decode order participates.
-    fn prove_directed_delegate_form_disjoint(
-        payload: Option<crate::form::DelegationPayload>,
-        target_form: &StructuralForm,
-        other: &StructuralForm,
-        entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry>>,
-        state: &mut DelegateProofState,
-    ) -> Result<(), ProofFailure> {
-        let Some(payload) = payload else {
-            return target_form.prove_disjoint_from(other, entries, state);
-        };
-        let constraint = payload.constraint_form();
-        let payload_target_proof = constraint.prove_disjoint_from(target_form, entries, state);
-        if payload_target_proof.is_ok() {
-            return Ok(());
-        }
-        let payload_other_proof = constraint.prove_disjoint_from(other, entries, state);
-        if payload_other_proof.is_ok() {
-            return Ok(());
-        }
-        let target_other_proof = target_form.prove_disjoint_from(other, entries, state);
-        if target_other_proof.is_ok() {
-            return Ok(());
-        }
-        match (
-            payload_target_proof,
-            payload_other_proof,
-            target_other_proof,
-        ) {
-            (Ok(()), _, _) | (_, Ok(()), _) | (_, _, Ok(())) => Ok(()),
-            (Err(cycle @ ProofFailure::DelegateExpansionCycle { .. }), _, _)
-            | (_, Err(cycle @ ProofFailure::DelegateExpansionCycle { .. }), _)
-            | (_, _, Err(cycle @ ProofFailure::DelegateExpansionCycle { .. })) => Err(cycle),
-            (_, _, Err(failure)) => Err(failure),
-        }
-    }
-}
-
-/// A proof failure is either an ordinary conservative refusal or a direct-delegate
-/// cycle, which must be surfaced separately at the public seal boundary.
 enum ProofFailure {
-    Disjointness(DisjointnessReason),
-    DelegateExpansionCycle { reentered: ScopedEncodedTypeId },
+    Reason(DisjointnessReason),
+    Cycle(ScopedEncodedTypeId),
 }
 
-impl From<DisjointnessReason> for ProofFailure {
-    fn from(reason: DisjointnessReason) -> Self {
-        Self::Disjointness(reason)
+type ProofResult = Result<(), ProofFailure>;
+
+fn reason<T>(reason: DisjointnessReason) -> Result<T, ProofFailure> {
+    Err(ProofFailure::Reason(reason))
+}
+
+fn outer<'a>(
+    descriptor: &'a SharedDescriptor,
+    roles: &'a BTreeMap<StableRoleId, SharedDescriptor>,
+) -> Result<Outer<'a>, ProofFailure> {
+    match descriptor {
+        SharedDescriptor::Atom(atom) => Ok(Outer::Atom(atom.case)),
+        SharedDescriptor::Literal(identifier) => Ok(Outer::Literal(*identifier)),
+        SharedDescriptor::Application { head, payload, .. } => {
+            Ok(Outer::Application(
+                roles
+                    .get(head)
+                    .ok_or(ProofFailure::Reason(DisjointnessReason::MissingRole {
+                        role: *head,
+                    }))?,
+                roles.get(payload).ok_or(ProofFailure::Reason(
+                    DisjointnessReason::MissingRole { role: *payload },
+                ))?,
+            ))
+        }
+        SharedDescriptor::Delimited { boundary, .. }
+        | SharedDescriptor::ItemBoundary { boundary, .. } => Ok(Outer::Boundary(*boundary)),
+        SharedDescriptor::Leaf(_) | SharedDescriptor::Repeated { .. } => Ok(Outer::Opaque),
+        SharedDescriptor::Delegate { .. } => unreachable!("delegates expand before outer proof"),
     }
 }
 
-impl StructuralEntry {
-    /// Validate that every accepted decode form across ALL constructors of this entry
-    /// is pairwise provably disjoint. Without a complete table, delegates are opaque.
+impl<Record: StructureRecord> StructuralEntry<Record> {
     pub fn validate_disjoint(&self) -> Result<(), DisjointnessError> {
         self.validate_disjoint_against(None)
     }
 
-    /// Validate this entry against the complete table under construction. Delegates
-    /// expand to their target entries' direct decode forms, preserving evaluator
-    /// wrapper semantics while allowing the seal proof to inspect their shape.
     pub(crate) fn validate_disjoint_with(
         &self,
-        entries: &BTreeMap<ScopedEncodedTypeId, StructuralEntry>,
+        entries: &BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
     ) -> Result<(), DisjointnessError> {
         self.validate_disjoint_against(Some(entries))
     }
 
     fn validate_disjoint_against(
         &self,
-        entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry>>,
+        entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
     ) -> Result<(), DisjointnessError> {
-        let forms: Vec<&StructuralForm> = self
-            .constructors
+        let alternatives = self
+            .constructors()
             .iter()
-            .flat_map(|codec| codec.decode_forms.iter())
-            .collect();
-
-        for (first, left) in forms.iter().enumerate() {
-            for (second, right) in forms.iter().enumerate().skip(first + 1) {
-                let mut state = DelegateProofState::default();
-                if let Err(failure) = left.prove_disjoint_from(right, entries, &mut state) {
-                    return Err(match failure {
-                        ProofFailure::Disjointness(reason) => {
-                            DisjointnessError::NotProvablyDisjoint {
-                                core_type: self.core_type,
-                                first,
-                                second,
-                                reason,
-                            }
-                        }
-                        ProofFailure::DelegateExpansionCycle { reentered } => {
-                            DisjointnessError::DelegateExpansionCycle {
-                                core_type: self.core_type,
-                                first,
-                                second,
-                                reentered,
-                            }
-                        }
-                    });
+            .flat_map(|codec| {
+                codec
+                    .decode_forms()
+                    .iter()
+                    .map(move |form| (codec.constructor(), form.identity(), form.rule()))
+            })
+            .collect::<Vec<_>>();
+        for (left_constructor, left_form, left) in &alternatives {
+            for (right_constructor, right_form, right) in &alternatives {
+                if (left_constructor, left_form) >= (right_constructor, right_form) {
+                    continue;
+                }
+                let mut active = BTreeSet::new();
+                match prove_rules(*left, *right, entries, &mut active) {
+                    Ok(()) => {}
+                    Err(ProofFailure::Reason(reason)) => {
+                        return Err(DisjointnessError::NotProvablyDisjoint {
+                            core_type: self.encoded_type(),
+                            first: *left_constructor,
+                            second: *right_constructor,
+                            reason,
+                        });
+                    }
+                    Err(ProofFailure::Cycle(reentered)) => {
+                        return Err(DisjointnessError::DelegateExpansionCycle {
+                            core_type: self.encoded_type(),
+                            reentered,
+                        });
+                    }
                 }
             }
         }
         Ok(())
     }
+}
+
+fn prove_rules<Record: StructureRecord>(
+    left: &Record,
+    right: &Record,
+    entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
+    active: &mut BTreeSet<ScopedEncodedTypeId>,
+) -> ProofResult {
+    let (left_root, left_roles) = fields(left);
+    let (right_root, right_roles) = fields(right);
+    prove(
+        left_roles.get(&left_root).ok_or(ProofFailure::Reason(
+            DisjointnessReason::MissingRole { role: left_root },
+        ))?,
+        &left_roles,
+        right_roles.get(&right_root).ok_or(ProofFailure::Reason(
+            DisjointnessReason::MissingRole { role: right_root },
+        ))?,
+        &right_roles,
+        entries,
+        active,
+    )
+}
+
+fn prove<Record: StructureRecord>(
+    left: &SharedDescriptor,
+    left_roles: &BTreeMap<StableRoleId, SharedDescriptor>,
+    right: &SharedDescriptor,
+    right_roles: &BTreeMap<StableRoleId, SharedDescriptor>,
+    entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
+    active: &mut BTreeSet<ScopedEncodedTypeId>,
+) -> ProofResult {
+    if let (
+        SharedDescriptor::Delegate {
+            payload: Some(left_payload),
+            ..
+        },
+        SharedDescriptor::Delegate {
+            payload: Some(right_payload),
+            ..
+        },
+    ) = (left, right)
+    {
+        match prove_payloads(*left_payload, *right_payload) {
+            Ok(()) => return Ok(()),
+            Err(ProofFailure::Reason(_)) => {}
+            Err(cycle) => return Err(cycle),
+        }
+    }
+
+    match (left, right) {
+        (SharedDescriptor::Delegate { target, payload }, _) => {
+            expand(*target, *payload, right, right_roles, entries, active)
+        }
+        (_, SharedDescriptor::Delegate { target, payload }) => {
+            expand(*target, *payload, left, left_roles, entries, active)
+        }
+        _ => match (outer(left, left_roles)?, outer(right, right_roles)?) {
+            (Outer::Opaque, _) | (_, Outer::Opaque) => reason(DisjointnessReason::OpaqueForm),
+            (Outer::Atom(left), Outer::Atom(right)) => match (left, right) {
+                (Some(left), Some(right)) if left != right => Ok(()),
+                _ => reason(DisjointnessReason::OverlappingAtomCase),
+            },
+            (Outer::Literal(left), Outer::Literal(right)) if left != right => Ok(()),
+            (Outer::Literal(_), Outer::Literal(_)) => reason(DisjointnessReason::SameLiteral),
+            (Outer::Atom(_), Outer::Literal(_)) | (Outer::Literal(_), Outer::Atom(_)) => {
+                reason(DisjointnessReason::LiteralMayMatchNameAtom)
+            }
+            (Outer::Application(_, _), Outer::Atom(_))
+            | (Outer::Atom(_), Outer::Application(_, _))
+            | (Outer::Application(_, _), Outer::Literal(_))
+            | (Outer::Literal(_), Outer::Application(_, _))
+            | (Outer::Boundary(_), Outer::Atom(_))
+            | (Outer::Atom(_), Outer::Boundary(_))
+            | (Outer::Boundary(_), Outer::Literal(_))
+            | (Outer::Literal(_), Outer::Boundary(_))
+            | (Outer::Application(_, _), Outer::Boundary(_))
+            | (Outer::Boundary(_), Outer::Application(_, _)) => Ok(()),
+            (Outer::Boundary(left), Outer::Boundary(right)) if left != right => Ok(()),
+            (Outer::Boundary(_), Outer::Boundary(_)) => reason(DisjointnessReason::SharedBoundary),
+            (
+                Outer::Application(left_head, left_payload),
+                Outer::Application(right_head, right_payload),
+            ) => {
+                match prove(
+                    left_head,
+                    left_roles,
+                    right_head,
+                    right_roles,
+                    entries,
+                    active,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(ProofFailure::Cycle(reentered)) => Err(ProofFailure::Cycle(reentered)),
+                    Err(ProofFailure::Reason(_)) => match prove(
+                        left_payload,
+                        left_roles,
+                        right_payload,
+                        right_roles,
+                        entries,
+                        active,
+                    ) {
+                        Ok(()) => Ok(()),
+                        Err(ProofFailure::Cycle(reentered)) => Err(ProofFailure::Cycle(reentered)),
+                        Err(ProofFailure::Reason(_)) => {
+                            reason(DisjointnessReason::ApplicationPositionsNotDisjoint)
+                        }
+                    },
+                }
+            }
+        },
+    }
+}
+
+fn prove_payloads(left: DelegationPayload, right: DelegationPayload) -> ProofResult {
+    match (left, right) {
+        (DelegationPayload::AtomCase(left), DelegationPayload::AtomCase(right))
+            if left != right =>
+        {
+            Ok(())
+        }
+        _ => reason(DisjointnessReason::OverlappingAtomCase),
+    }
+}
+
+fn payload_descriptor(payload: DelegationPayload) -> SharedDescriptor {
+    match payload {
+        DelegationPayload::AtomCase(case) => {
+            SharedDescriptor::Atom(AtomDescriptor::with_case(case))
+        }
+    }
+}
+
+fn expand<Record: StructureRecord>(
+    target: ScopedEncodedTypeId,
+    payload: Option<DelegationPayload>,
+    other: &SharedDescriptor,
+    other_roles: &BTreeMap<StableRoleId, SharedDescriptor>,
+    entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
+    active: &mut BTreeSet<ScopedEncodedTypeId>,
+) -> ProofResult {
+    let entries = entries.ok_or(ProofFailure::Reason(
+        DisjointnessReason::MissingDelegateTarget { target },
+    ))?;
+    if !active.insert(target) {
+        return Err(ProofFailure::Cycle(target));
+    }
+    let result = (|| {
+        let entry = entries.get(&target).ok_or(ProofFailure::Reason(
+            DisjointnessReason::MissingDelegateTarget { target },
+        ))?;
+        for codec in entry.constructors() {
+            for accepted in codec.decode_forms() {
+                let (root, roles) = fields(accepted.rule());
+                let descriptor = roles.get(&root).ok_or(ProofFailure::Reason(
+                    DisjointnessReason::MissingRole { role: root },
+                ))?;
+                if let Some(payload) = payload {
+                    let restriction = payload_descriptor(payload);
+                    match prove(
+                        &restriction,
+                        &BTreeMap::new(),
+                        other,
+                        other_roles,
+                        Some(entries),
+                        active,
+                    ) {
+                        Ok(()) => continue,
+                        Err(ProofFailure::Cycle(reentered)) => {
+                            return Err(ProofFailure::Cycle(reentered));
+                        }
+                        Err(ProofFailure::Reason(_)) => {}
+                    }
+                    match prove(
+                        descriptor,
+                        &roles,
+                        &restriction,
+                        &BTreeMap::new(),
+                        Some(entries),
+                        active,
+                    ) {
+                        Ok(()) => continue,
+                        Err(ProofFailure::Cycle(reentered)) => {
+                            return Err(ProofFailure::Cycle(reentered));
+                        }
+                        Err(ProofFailure::Reason(_)) => {}
+                    }
+                }
+                prove(
+                    descriptor,
+                    &roles,
+                    other,
+                    other_roles,
+                    Some(entries),
+                    active,
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    active.remove(&target);
+    result
 }

@@ -1,71 +1,68 @@
-//! Typed errors at the crate boundary (thiserror; no anyhow). Each operation owns a
-//! focused error enum: disjointness validation, decoding, encoding, and table
-//! identity.
+//! Typed failures at the structural-codec boundary.
 
 use content_identity::ArchiveError;
 use name_table::NameTableError;
+use raw_discovery::{RecognizeError, TokenProfileError, TriggerIdentifier};
 
 use crate::form::DelegationPayload;
-use crate::ids::ScopedEncodedTypeId;
-use raw_discovery::{TokenProfileError, TriggerIdentifier};
+use crate::ids::{EncodedConstructorId, ScopedEncodedTypeId, StableRoleId};
 
-/// A structural table failed conservative disjointness validation: two accepted
-/// decode forms could not be PROVEN structurally distinct, so one might silently
-/// shadow the other. Conservative-safe: unprovable disjointness is an error.
-///
-/// This error is archiveable so callers can retain a typed seal refusal.
+/// A checked authoring operation refused to construct an invalid archived
+/// record. Semantic consistency is then enforced when the table seals.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AuthoringError {
+    #[error("field role zero is reserved")]
+    ZeroRoleIdentity,
+    #[error("field role {role:?} is present more than once")]
+    DuplicateRoleIdentity { role: StableRoleId },
+}
+
 #[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Clone, Debug, thiserror::Error)]
 pub enum DisjointnessError {
     #[error(
-        "core type {core_type:?}: decode forms {first} and {second} are not provably disjoint ({reason})"
+        "encoded type {core_type:?}: accepted forms under {first:?} and {second:?} are not provably disjoint ({reason})"
     )]
     NotProvablyDisjoint {
         core_type: ScopedEncodedTypeId,
-        first: usize,
-        second: usize,
+        first: EncodedConstructorId,
+        second: EncodedConstructorId,
         reason: DisjointnessReason,
     },
-    #[error(
-        "core type {core_type:?}: decode forms {first} and {second} contain an unresolved delegate expansion cycle through {reentered:?}"
-    )]
+    #[error("encoded type {core_type:?}: delegate proof re-entered {reentered:?}")]
     DelegateExpansionCycle {
         core_type: ScopedEncodedTypeId,
-        first: usize,
-        second: usize,
         reentered: ScopedEncodedTypeId,
     },
 }
 
-/// The typed reason a pair of forms could not be proven disjoint.
 #[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Clone, Debug, thiserror::Error)]
 pub enum DisjointnessReason {
-    #[error("delegate target {target:?} has no table entry available for proof")]
+    #[error("delegate target {target:?} has no table entry")]
     MissingDelegateTarget { target: ScopedEncodedTypeId },
-    #[error("a leaf form has no pinned block kind")]
+    #[error("a leaf or repeated form has no pinned outer kind")]
     OpaqueForm,
     #[error("both forms accept an overlapping atom case")]
     OverlappingAtomCase,
-    #[error("both forms require the same interned literal")]
+    #[error("both forms require the same literal")]
     SameLiteral,
-    #[error("a literal atom might satisfy the name atom's case constraint")]
+    #[error("a literal may satisfy the atom form")]
     LiteralMayMatchNameAtom,
-    #[error("neither the application head nor payload is provably disjoint")]
+    #[error("neither application position is provably disjoint")]
     ApplicationPositionsNotDisjoint,
-    #[error("both forms use the same delimiter")]
-    SharedDelimiter,
+    #[error("both forms activate the same boundary")]
+    SharedBoundary,
+    #[error("a role link {role:?} is absent from the typed record")]
+    MissingRole { role: StableRoleId },
 }
 
-/// Decoding source text or a structural block under an expected type failed. A
-/// failed decode leaves the NameTable byte-for-byte unchanged (interning
-/// atomicity, law 3).
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum DecodeError {
-    #[error("direct textual decoding requires a sealed token profile")]
-    MissingTokenProfile,
     #[error("the structural table and supplied token profile have different identities")]
     TokenProfileIdentityMismatch,
     #[error(transparent)]
     TokenProfile(#[from] TokenProfileError),
+    #[error(transparent)]
+    Recognition(#[from] RecognizeError),
     #[error("no structural entry for expected type {0:?}")]
     UnknownType(ScopedEncodedTypeId),
     #[error("expected {expected} block, found {found}")]
@@ -75,87 +72,78 @@ pub enum DecodeError {
     },
     #[error("atom case did not match the expected form")]
     CaseMismatch,
+    /// EC18: absent literal data is materially distinct from a present but
+    /// non-matching literal.
     #[error("literal decoding requires a configured lexicon")]
     MissingLexicon,
     #[error("literal atom did not match the expected interned keyword")]
     LiteralMismatch,
-    #[error("the delegated position did not satisfy its typed direction {payload:?}")]
+    #[error("delegated position did not satisfy {payload:?}")]
     DelegationPayloadMismatch { payload: DelegationPayload },
-    #[error("delimited sequence held {found} objects, outside the form's bounds")]
-    SequenceCardinality { found: u64 },
+    #[error("repeated position held {found} objects outside its declared bounds")]
+    RepetitionCardinality { found: u64 },
     #[error("could not flatten the block to a scalar leaf")]
     LeafNotFlattenable,
     #[error("scalar leaf failed to parse: {0}")]
     ScalarParse(String),
     #[error("transparent delegation cycle through type {0:?}")]
     DelegationCycle(ScopedEncodedTypeId),
-    #[error("product form arity {form} did not match the {blocks} sibling blocks")]
-    ProductArity { form: usize, blocks: usize },
+    #[error("typed role {role:?} is absent from this record")]
+    MissingRole { role: StableRoleId },
+    #[error("the profile boundary {boundary:?} does not match this raw block")]
+    BoundaryMismatch { boundary: TriggerIdentifier },
     #[error("no accepted decode form matched under expected type {core_type:?}")]
     NoAlternative { core_type: ScopedEncodedTypeId },
-    #[error("expected text at byte {byte_offset}")]
-    ExpectedText { byte_offset: usize },
-    #[error("expected trigger {expected:?}, found {found:?}")]
-    ExpectedTrigger {
-        expected: TriggerIdentifier,
-        found: Option<TriggerIdentifier>,
-    },
-    #[error("trigger {identifier:?} did not provide the required {expected} role")]
-    ExpectedTriggerRole {
-        identifier: TriggerIdentifier,
-        expected: &'static str,
-    },
-    #[error("text remained after the expected root form at byte {byte_offset}")]
-    TrailingText { byte_offset: usize },
-    #[error(
-        "child decoding failed inside boundary {boundary:?} interior [{start}, {end}): {source}"
-    )]
-    BoundedInterior {
-        boundary: TriggerIdentifier,
-        start: usize,
-        end: usize,
-        #[source]
-        source: Box<DecodeError>,
-    },
-    #[error("a repeated textual form succeeded without advancing the reader")]
-    TextReaderDidNotAdvance,
+    #[error("source did not contain exactly one root object")]
+    RootObjectCount,
     #[error(transparent)]
     Names(#[from] NameTableError),
 }
 
-/// Encoding a structural value to canonical text or a structural block failed.
+impl DecodeError {
+    /// Whether a failed alternative merely did not structurally match. Only
+    /// these failures may advance alternative evaluation; table/profile/name
+    /// failures retain their exact cause.
+    pub(crate) fn is_structural_non_match(&self) -> bool {
+        matches!(
+            self,
+            Self::BlockKindMismatch { .. }
+                | Self::CaseMismatch
+                | Self::LiteralMismatch
+                | Self::DelegationPayloadMismatch { .. }
+                | Self::RepetitionCardinality { .. }
+                | Self::LeafNotFlattenable
+                | Self::ScalarParse(_)
+                | Self::BoundaryMismatch { .. }
+                | Self::NoAlternative { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum EncodeError {
-    #[error("direct textual encoding requires a sealed token profile")]
-    MissingTokenProfile,
     #[error("the structural table and supplied token profile have different identities")]
     TokenProfileIdentityMismatch,
     #[error(transparent)]
     TokenProfile(#[from] TokenProfileError),
     #[error("no structural entry for expected type {0:?}")]
     UnknownType(ScopedEncodedTypeId),
-    #[error("value chose constructor {chosen}, but the entry has {available} constructors")]
-    ConstructorOutOfRange { chosen: u32, available: usize },
-    #[error("value shape did not fit the canonical encode form: {0}")]
-    ShapeMismatch(&'static str),
+    #[error("value selected constructor {chosen:?}, which is not in this entry")]
+    UnknownConstructor { chosen: EncodedConstructorId },
+    #[error("value shape did not fit the canonical descriptor")]
+    ShapeMismatch,
     #[error("the encoded atom did not match the canonical literal")]
     LiteralMismatch,
-    #[error("the encoded delegated position did not satisfy its typed direction {payload:?}")]
+    #[error("delegated position did not satisfy {payload:?}")]
     DelegationPayloadMismatch { payload: DelegationPayload },
-    #[error("trigger {identifier:?} did not provide the required {expected} role")]
-    ExpectedTriggerRole {
-        identifier: TriggerIdentifier,
-        expected: &'static str,
-    },
-    #[error("a value spelling would not decode canonically at its structural position")]
+    #[error("typed role {role:?} is absent from this record or mirror")]
+    MissingRole { role: StableRoleId },
+    #[error("a value spelling would not decode canonically")]
     NonCanonicalSpelling,
-    #[error("the table has no canonical separator trigger")]
-    MissingCanonicalSeparator,
     #[error(transparent)]
     Names(#[from] NameTableError),
 }
 
-/// Computing a table's content identity failed.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TableError {
     #[error(transparent)]
@@ -164,24 +152,58 @@ pub enum TableError {
     Archive(#[from] ArchiveError),
     #[error("the structural table and supplied token profile have different identities")]
     TokenProfileIdentityMismatch,
-    #[error("trigger {identifier:?} does not provide the required {expected} role")]
-    WrongTriggerKind {
-        identifier: TriggerIdentifier,
-        expected: &'static str,
+    #[error("table language {table:?} conflicts with encoded type {encoded:?}")]
+    LanguageMismatch {
+        table: crate::ids::EncodedLanguage,
+        encoded: ScopedEncodedTypeId,
     },
-    #[error("delegate target {target:?} is missing while validating lexical positions")]
-    MissingLexicalDelegateTarget { target: ScopedEncodedTypeId },
+    #[error("constructor {constructor:?} does not belong under entry {entry:?}")]
+    ConstructorUnderWrongEntry {
+        constructor: EncodedConstructorId,
+        entry: ScopedEncodedTypeId,
+    },
+    #[error("entry key {key:?} does not equal its archived type {entry:?}")]
+    EntryKeyMismatch {
+        entry: ScopedEncodedTypeId,
+        key: ScopedEncodedTypeId,
+    },
+    #[error("entry {entry:?} has no constructors")]
+    EmptyEntry { entry: ScopedEncodedTypeId },
+    #[error("entry {entry:?} repeats constructor identity {constructor:?}")]
+    DuplicateConstructor {
+        entry: ScopedEncodedTypeId,
+        constructor: EncodedConstructorId,
+    },
+    #[error("constructor {constructor:?} repeats accepted decode-form identity {form:?}")]
+    DuplicateDecodeForm {
+        constructor: EncodedConstructorId,
+        form: crate::ids::DecodeFormId,
+    },
+    #[error("a reserved fixture Schema id appeared in a non-fixture vocabulary")]
+    ReservedFixtureIdInLanguageTable,
+    #[error("a fixture vocabulary included a non-reserved encoded type")]
+    FixtureVocabularyHasProductionId,
+    #[error("a typed record repeats role {role:?}")]
+    DuplicateRole { role: StableRoleId },
+    #[error("an archived role identity was zero")]
+    ZeroRoleIdentity,
+    #[error(
+        "an archived role identity {actual:?} does not match its typed field role {expected:?}"
+    )]
+    RoleIdentityMismatch {
+        expected: StableRoleId,
+        actual: StableRoleId,
+    },
+    #[error("descriptor refers to missing role {role:?}")]
+    MissingRole { role: StableRoleId },
+    #[error("trigger {identifier:?} does not provide the required role")]
+    WrongTriggerKind { identifier: TriggerIdentifier },
     #[error(transparent)]
     TokenProfile(#[from] TokenProfileError),
 }
 
-/// A [`TextualForm`](crate::TextualForm) value did not carry the single text chunk the
-/// provided un-view path requires. The trivial single-document case is one chunk; the
-/// multi-chunk (filename→text) index is a deferred packaging future, so an un-view of a
-/// zero- or many-chunk view is a loud, typed error rather than a silent pick.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("the textual form carried {count} chunks; un-view requires exactly one")]
 pub struct SingleChunkRequired {
-    /// How many chunks the view actually carried.
     pub count: usize,
 }

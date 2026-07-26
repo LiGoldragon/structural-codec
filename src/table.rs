@@ -1,424 +1,474 @@
-//! The addressed structural table: the external sidecar keyed by `ScopedEncodedTypeId`.
-//! Its content identity is computed over `TableIdentityPayload` and STORED OUTSIDE
-//! that payload (fixing the self-reference bug), and is EXCLUDED from Core value
-//! identity by construction — Core hashing never sees the table. Old table decodes
-//! old text, a new table encodes new text, and both reach the same Core value (§4.6).
+//! Sealed, vocabulary-identified tables of archived typed rule records.
+//!
+//! A downstream vocabulary can construct its typed records without access to
+//! raw identity fields, combine several record shapes with
+//! [`RuleCoproduct`](crate::form::RuleCoproduct),
+//! then seal the whole table as the validation boundary. The shared evaluator
+//! and prover operate on its `StructureRecord` field data; the record type does
+//! not implement grammar behavior:
+//!
+//! ```
+//! use std::collections::BTreeMap;
+//!
+//! use raw_discovery::{RawProfile, TriggerSet};
+//! use structural_codec::{
+//!     AcceptedDecodeForm, AddressedStructuralTable, ConstructorCodec, DecodeFormId,
+//!     EncodedConstructorId, EncodedLanguage, LeafCodec, ScopedEncodedTypeId,
+//!     SharedDescriptor, StructuralEntry, StructuralRule, StructuralVocabularyIdentity,
+//!     TableIdentityPayload, TargetLayoutIdentity, UnaryRule,
+//! };
+//!
+//! let profile = RawProfile::standard().seal()?;
+//! let type_id = ScopedEncodedTypeId::schema(7);
+//! let rule = StructuralRule::Unary(
+//!     UnaryRule::new(SharedDescriptor::Leaf(LeafCodec::Integer)).expect("built-in role"),
+//! );
+//! let constructor = EncodedConstructorId::under(type_id, 1);
+//! let entry = StructuralEntry::new(
+//!     type_id,
+//!     vec![ConstructorCodec::new(
+//!         constructor,
+//!         vec![AcceptedDecodeForm::new(DecodeFormId::new(1), rule.clone())],
+//!         rule,
+//!     )],
+//! );
+//! let payload = TableIdentityPayload::new(
+//!     EncodedLanguage::Schema,
+//!     TargetLayoutIdentity::derive(b"downstream encoded layout"),
+//!     profile.identity(),
+//!     StructuralVocabularyIdentity::language(b"downstream vocabulary"),
+//!     TriggerSet::new(vec![]),
+//!     BTreeMap::from([(type_id, entry)]),
+//! );
+//! let table = AddressedStructuralTable::seal(payload, &profile)?;
+//! assert!(table.entry(type_id).is_some());
+//! # Ok::<(), structural_codec::TableError>(())
+//! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use content_identity::{ContentHash, DomainSeparation, HashDomain, LayoutVersion};
-use raw_discovery::{
-    SealedTokenProfile, TokenProfileError, Trigger, TriggerIdentifier, TriggerSet,
-};
+use content_identity::{ArchiveError, ContentHash, DomainSeparation, HashDomain, LayoutVersion};
+use raw_discovery::{SealedTokenProfile, TokenProfileDomain, Trigger, TriggerSet};
 
 use crate::codec::StructuralEntry;
-use crate::error::{DisjointnessError, TableError};
-use crate::form::{SequenceForm, StructuralForm};
-use crate::ids::{EncodedUniverseId, ScopedEncodedTypeId};
+use crate::error::TableError;
+use crate::form::{
+    BorrowedFieldView, FieldVisitor, SharedDescriptor, StructuralRule, StructureRecord,
+};
+use crate::ids::{EncodedLanguage, ScopedEncodedTypeId, StableRoleId};
 
-/// The identity of a Core layout the forms target (supplied by the Core side).
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-)]
-pub struct EncodedLayoutIdentity(pub [u8; 32]);
-
-/// The identity of the separately sealed token profile.
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-)]
-pub struct RawProfileIdentity(pub [u8; 32]);
-
-impl RawProfileIdentity {
-    pub fn from_profile(profile: &SealedTokenProfile) -> Self {
-        Self(*profile.identity().bytes())
+/// The target encoded-layout identity is a domain-typed content address. There
+/// is no raw byte wrapper, default value, or zero placeholder.
+pub struct TargetLayoutDomain;
+impl HashDomain for TargetLayoutDomain {
+    fn separation() -> DomainSeparation {
+        DomainSeparation::Contextual {
+            context: "structural-codec 2026 target encoded layout",
+            layout: LayoutVersion::new(1),
+        }
     }
+}
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TargetLayoutIdentity(ContentHash<TargetLayoutDomain>);
 
-    pub fn matches(self, profile: &SealedTokenProfile) -> bool {
-        self == Self::from_profile(profile)
+impl TargetLayoutIdentity {
+    /// Derive the identity from canonical target-layout data. Raw digest bytes
+    /// have no constructor at this boundary, so zero/default placeholders are
+    /// unrepresentable.
+    pub fn derive(layout_data: &[u8]) -> Self {
+        Self(ContentHash::derive(layout_data))
     }
 }
 
-/// The identity of a leaf codec's contract.
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-)]
-pub struct LeafCodecContractId(pub u32);
+/// Domain for production structuretree vocabularies.
+pub struct StructuralVocabularyDomain;
+impl HashDomain for StructuralVocabularyDomain {
+    fn separation() -> DomainSeparation {
+        DomainSeparation::Contextual {
+            context: "structural-codec 2026 structuretree vocabulary",
+            layout: LayoutVersion::new(1),
+        }
+    }
+}
 
-/// The table-identity pre-image. The resulting hash is stored on
-/// `AddressedStructuralTable`, NEVER inside here.
+/// A separate domain makes test-only sidecars unable to masquerade as a
+/// production vocabulary even when their language dimension is Schema.
+pub struct FixtureVocabularyDomain;
+impl HashDomain for FixtureVocabularyDomain {
+    fn separation() -> DomainSeparation {
+        DomainSeparation::Contextual {
+            context: "structural-codec 2026 test vocabulary",
+            layout: LayoutVersion::new(1),
+        }
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructuralVocabularyIdentity {
+    Language(ContentHash<StructuralVocabularyDomain>),
+    Fixture(ContentHash<FixtureVocabularyDomain>),
+}
+
+impl StructuralVocabularyIdentity {
+    /// Derive a production vocabulary identity from its canonical archived
+    /// vocabulary bytes.
+    pub fn language(data: &[u8]) -> Self {
+        Self::Language(ContentHash::derive(data))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(label: &[u8]) -> Self {
+        Self::Fixture(ContentHash::derive(label))
+    }
+
+    fn is_fixture(self) -> bool {
+        matches!(self, Self::Fixture(_))
+    }
+}
+
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct TableIdentityPayload {
-    pub core_universe: EncodedUniverseId,
-    pub core_layout_identity: EncodedLayoutIdentity,
-    pub raw_profile_identity: RawProfileIdentity,
-    /// Trivia triggers active at every textual structural position.
-    pub trivia_triggers: TriggerSet,
-    pub leaf_codec_contracts: Vec<LeafCodecContractId>,
-    pub entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry>,
+pub struct TableIdentityPayload<Record = StructuralRule> {
+    language: EncodedLanguage,
+    target_layout_identity: TargetLayoutIdentity,
+    token_profile_identity: ContentHash<TokenProfileDomain>,
+    vocabulary_identity: StructuralVocabularyIdentity,
+    trivia_triggers: TriggerSet,
+    entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
 }
 
-/// The hash domain for structural tables, layout-version tagged.
-pub struct StructuralTableDomain;
+impl<Record> TableIdentityPayload<Record> {
+    /// Assemble the complete, typed identity pre-image for a structural table.
+    /// Content hashes cross this boundary in their typed domains; raw digest
+    /// bytes have no authoring path.
+    pub fn new(
+        language: EncodedLanguage,
+        target_layout_identity: TargetLayoutIdentity,
+        token_profile_identity: ContentHash<TokenProfileDomain>,
+        vocabulary_identity: StructuralVocabularyIdentity,
+        trivia_triggers: TriggerSet,
+        entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
+    ) -> Self {
+        Self {
+            language,
+            target_layout_identity,
+            token_profile_identity,
+            vocabulary_identity,
+            trivia_triggers,
+            entries,
+        }
+    }
+}
 
+/// One truthful R3/R4 layout bump: layout 6 to layout 7.
+pub struct StructuralTableDomain;
 impl HashDomain for StructuralTableDomain {
     fn separation() -> DomainSeparation {
         DomainSeparation::Contextual {
             context: "structural-codec 2026 addressed structural table",
-            // Layout 6 binds recursive form positions to profile triggers and
-            // carries the universal trivia set in the table pre-image.
-            layout: LayoutVersion::new(6),
+            layout: LayoutVersion::new(7),
         }
     }
 }
 
-/// A sealed structural table with its identity stored outside the hashed payload.
 #[derive(Clone, Debug)]
-pub struct AddressedStructuralTable {
-    payload: TableIdentityPayload,
+pub struct AddressedStructuralTable<Record = StructuralRule> {
+    payload: TableIdentityPayload<Record>,
     identity: ContentHash<StructuralTableDomain>,
 }
 
-impl AddressedStructuralTable {
-    /// Prove every decode form disjoint, then compute the table identity over its
-    /// complete payload and store that identity outside its pre-image.
+/// Archive capability for the complete static table payload. The blanket
+/// implementation is available when its record type is rkyv-derived; it carries
+/// no grammar behavior and only writes canonical identity bytes.
+pub trait ArchivedTablePayload {
+    #[doc(hidden)]
+    fn table_identity(&self) -> Result<ContentHash<StructuralTableDomain>, ArchiveError>;
+}
+
+impl<Record> ArchivedTablePayload for TableIdentityPayload<Record>
+where
+    Record: rkyv::Archive
+        + for<'serialize> rkyv::Serialize<
+            rkyv::rancor::Strategy<
+                rkyv::ser::Serializer<
+                    rkyv::util::AlignedVec,
+                    rkyv::ser::allocator::ArenaHandle<'serialize>,
+                    rkyv::ser::sharing::Share,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    fn table_identity(&self) -> Result<ContentHash<StructuralTableDomain>, ArchiveError> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .map_err(|error| ArchiveError::Serialize(error.to_string()))?;
+        Ok(ContentHash::derive(bytes.as_ref()))
+    }
+}
+
+impl<Record: StructureRecord> AddressedStructuralTable<Record> {
     pub fn seal(
-        payload: TableIdentityPayload,
+        payload: TableIdentityPayload<Record>,
         profile: &SealedTokenProfile,
-    ) -> Result<Self, TableError> {
-        if !payload.raw_profile_identity.matches(profile) {
+    ) -> Result<Self, TableError>
+    where
+        TableIdentityPayload<Record>: ArchivedTablePayload,
+    {
+        if payload.token_profile_identity != profile.identity() {
             return Err(TableError::TokenProfileIdentityMismatch);
         }
-        for entry in payload.entries.values() {
-            entry.validate_disjoint_with(&payload.entries)?;
-        }
-        Self::validate_lexical_positions(&payload, profile)?;
-        let identity = ContentHash::of_core(&payload)?;
+        Self::validate(&payload, profile)?;
+        let identity = payload.table_identity()?;
         Ok(Self { payload, identity })
     }
 
-    /// The table's content identity — co-versioned with the language package,
-    /// EXCLUDED from Core value identity.
     pub fn identity(&self) -> ContentHash<StructuralTableDomain> {
         self.identity
     }
-
-    /// Queried BY expected type, never globally searched; the input never selects its
-    /// own type.
-    pub fn entry(&self, expected: ScopedEncodedTypeId) -> Option<&StructuralEntry> {
+    pub fn entry(&self, expected: ScopedEncodedTypeId) -> Option<&StructuralEntry<Record>> {
         self.payload.entries.get(&expected)
     }
-
-    pub fn raw_profile_identity(&self) -> RawProfileIdentity {
-        self.payload.raw_profile_identity
+    pub fn token_profile_identity(&self) -> ContentHash<TokenProfileDomain> {
+        self.payload.token_profile_identity
+    }
+    pub fn vocabulary_identity(&self) -> StructuralVocabularyIdentity {
+        self.payload.vocabulary_identity
+    }
+    pub fn language(&self) -> EncodedLanguage {
+        self.payload.language
     }
 
-    pub fn trivia_triggers(&self) -> &TriggerSet {
-        &self.payload.trivia_triggers
-    }
-
-    /// Validate conservative disjointness across every entry.
-    pub fn validate_disjoint(&self) -> Result<(), DisjointnessError> {
-        for entry in self.payload.entries.values() {
-            entry.validate_disjoint_with(&self.payload.entries)?;
-        }
-        Ok(())
-    }
-
-    fn validate_lexical_positions(
-        payload: &TableIdentityPayload,
+    fn validate(
+        payload: &TableIdentityPayload<Record>,
         profile: &SealedTokenProfile,
     ) -> Result<(), TableError> {
-        for identifier in payload.trivia_triggers.triggers() {
-            Self::require_trigger_kind(profile, *identifier, "trivia", |kind| {
-                matches!(
-                    kind,
-                    Trigger::Whitespace { .. } | Trigger::LineComment { .. }
-                )
-            })?;
-        }
         profile.seal_trigger_set(payload.trivia_triggers.clone())?;
-        for entry in payload.entries.values() {
-            let initial =
-                Self::initial_type_triggers(entry.core_type, payload, &mut BTreeSet::new())?;
-            Self::seal_position(profile, &payload.trivia_triggers, &initial, None)?;
-            for codec in &entry.constructors {
-                for form in codec
-                    .decode_forms
-                    .iter()
-                    .chain(std::iter::once(&codec.encode_form))
-                {
-                    let mut delegate_path = BTreeSet::new();
-                    Self::validate_form_position(form, &[], payload, profile, &mut delegate_path)?;
-                }
+        for type_id in payload.entries.keys() {
+            if type_id.language() != payload.language {
+                return Err(TableError::LanguageMismatch {
+                    table: payload.language,
+                    encoded: *type_id,
+                });
             }
+            if payload.vocabulary_identity.is_fixture() != type_id.is_reserved_fixture_schema() {
+                return Err(if payload.vocabulary_identity.is_fixture() {
+                    TableError::FixtureVocabularyHasProductionId
+                } else {
+                    TableError::ReservedFixtureIdInLanguageTable
+                });
+            }
+        }
+        for (type_id, entry) in &payload.entries {
+            if entry.encoded_type() != *type_id {
+                return Err(TableError::EntryKeyMismatch {
+                    entry: entry.encoded_type(),
+                    key: *type_id,
+                });
+            }
+            if entry.constructors().is_empty() {
+                return Err(TableError::EmptyEntry { entry: *type_id });
+            }
+            let mut constructors = std::collections::BTreeSet::new();
+            for codec in entry.constructors() {
+                if !constructors.insert(codec.constructor()) {
+                    return Err(TableError::DuplicateConstructor {
+                        entry: *type_id,
+                        constructor: codec.constructor(),
+                    });
+                }
+                if codec.constructor().type_id() != *type_id {
+                    return Err(TableError::ConstructorUnderWrongEntry {
+                        constructor: codec.constructor(),
+                        entry: *type_id,
+                    });
+                }
+                let mut forms = std::collections::BTreeSet::new();
+                for accepted in codec.decode_forms() {
+                    if !forms.insert(accepted.identity()) {
+                        return Err(TableError::DuplicateDecodeForm {
+                            constructor: codec.constructor(),
+                            form: accepted.identity(),
+                        });
+                    }
+                    Self::validate_rule(accepted.rule(), profile)?;
+                }
+                Self::validate_rule(codec.encode_form(), profile)?;
+            }
+            entry.validate_disjoint_with(&payload.entries)?;
         }
         Ok(())
     }
 
-    fn validate_form_position(
-        form: &StructuralForm,
-        inherited: &[TriggerIdentifier],
-        payload: &TableIdentityPayload,
+    fn validate_rule(rule: &Record, profile: &SealedTokenProfile) -> Result<(), TableError> {
+        struct Roles {
+            values: BTreeMap<StableRoleId, SharedDescriptor>,
+            duplicate: Option<StableRoleId>,
+            zero: bool,
+            mismatch: Option<(StableRoleId, StableRoleId)>,
+        }
+        impl FieldVisitor for Roles {
+            fn field<Role: crate::ids::FieldRole>(
+                &mut self,
+                position: &crate::form::Position<Role>,
+            ) {
+                let expected = StableRoleId::for_role::<Role>();
+                let actual = position.role();
+                self.zero |= actual.value() == 0;
+                if actual != expected {
+                    self.mismatch = Some((expected, actual));
+                }
+                if self
+                    .values
+                    .insert(actual, position.descriptor().clone())
+                    .is_some()
+                {
+                    self.duplicate = Some(actual);
+                }
+            }
+        }
+        let mut roles = Roles {
+            values: BTreeMap::new(),
+            duplicate: None,
+            zero: false,
+            mismatch: None,
+        };
+        rule.fields().expose(&mut roles);
+        if roles.zero {
+            return Err(TableError::ZeroRoleIdentity);
+        }
+        if let Some((expected, actual)) = roles.mismatch {
+            return Err(TableError::RoleIdentityMismatch { expected, actual });
+        }
+        if let Some(role) = roles.duplicate {
+            return Err(TableError::DuplicateRole { role });
+        }
+        let root = rule.root_role();
+        let descriptor = roles
+            .values
+            .get(&root)
+            .ok_or(TableError::MissingRole { role: root })?;
+        Self::validate_descriptor(descriptor, &roles.values, profile)
+    }
+
+    fn validate_descriptor(
+        descriptor: &SharedDescriptor,
+        roles: &BTreeMap<StableRoleId, SharedDescriptor>,
         profile: &SealedTokenProfile,
-        delegate_path: &mut BTreeSet<(ScopedEncodedTypeId, Vec<TriggerIdentifier>)>,
     ) -> Result<(), TableError> {
-        match form {
-            StructuralForm::Atom(atom) => {
-                if let Some(trigger) = atom.trigger {
-                    Self::require_trigger_kind(
-                        profile,
-                        trigger,
-                        "leading character class",
-                        |kind| matches!(kind, Trigger::LeadingCharacterClass { .. }),
-                    )?;
-                }
-                Self::seal_position(profile, &payload.trivia_triggers, inherited, atom.trigger)?;
-            }
-            StructuralForm::Leaf(leaf) => {
-                if let Some(trigger) = leaf.trigger {
-                    Self::require_trigger_kind(
-                        profile,
-                        trigger,
-                        "leaf carrier or class",
-                        |kind| {
-                            matches!(
-                                kind,
-                                Trigger::Carrier { .. } | Trigger::LeadingCharacterClass { .. }
-                            )
-                        },
-                    )?;
-                }
-                Self::seal_position(profile, &payload.trivia_triggers, inherited, leaf.trigger)?;
-            }
-            StructuralForm::Literal(_) => {
-                Self::seal_position(profile, &payload.trivia_triggers, inherited, None)?;
-            }
-            StructuralForm::Application {
+        match descriptor {
+            SharedDescriptor::Application {
                 operator,
                 head,
-                payload: application_payload,
+                payload,
             } => {
-                Self::require_trigger_kind(
-                    profile,
-                    *operator,
-                    "application or punctuation",
-                    |kind| {
-                        matches!(
-                            kind,
-                            Trigger::Application { .. } | Trigger::Punctuation { .. }
-                        )
-                    },
-                )?;
-                let mut head_terminators = inherited.to_vec();
-                head_terminators.push(*operator);
-                Self::validate_form_position(
-                    head,
-                    &head_terminators,
-                    payload,
-                    profile,
-                    delegate_path,
-                )?;
-                Self::validate_form_position(
-                    application_payload,
-                    inherited,
-                    payload,
-                    profile,
-                    delegate_path,
-                )?;
-            }
-            StructuralForm::Delimited {
-                boundary, sequence, ..
-            } => {
-                Self::require_trigger_kind(profile, *boundary, "boundary", |kind| {
-                    matches!(kind, Trigger::Boundary { .. })
-                })?;
-                Self::seal_position(
-                    profile,
-                    &payload.trivia_triggers,
-                    inherited,
-                    Some(*boundary),
-                )?;
-                let mut interior_terminators = Self::boundary_terminators(profile, inherited)?;
-                interior_terminators.push(*boundary);
-                interior_terminators.sort_unstable();
-                interior_terminators.dedup();
-                match sequence {
-                    SequenceForm::Product(forms) => {
-                        for child in forms {
-                            Self::validate_form_position(
-                                child,
-                                &interior_terminators,
-                                payload,
-                                profile,
-                                delegate_path,
-                            )?;
-                        }
-                    }
-                    SequenceForm::Repeat { element, .. } => Self::validate_form_position(
-                        element,
-                        &interior_terminators,
-                        payload,
-                        profile,
-                        delegate_path,
-                    )?,
+                if !matches!(
+                    profile.definition(*operator)?.trigger,
+                    Trigger::Application { .. } | Trigger::Punctuation { .. }
+                ) {
+                    return Err(TableError::WrongTriggerKind {
+                        identifier: *operator,
+                    });
+                }
+                for role in [head, payload] {
+                    let child = roles
+                        .get(role)
+                        .ok_or(TableError::MissingRole { role: *role })?;
+                    Self::validate_descriptor(child, roles, profile)?;
                 }
             }
-            StructuralForm::Delegate { target, .. } => {
-                let initial = Self::initial_type_triggers(*target, payload, &mut BTreeSet::new())?;
-                let mut active_initial = inherited.to_vec();
-                active_initial.extend(initial);
-                Self::seal_position(profile, &payload.trivia_triggers, &active_initial, None)?;
-                let key = (*target, inherited.to_vec());
-                if !delegate_path.insert(key.clone()) {
-                    return Ok(());
+            SharedDescriptor::Delimited { boundary, content }
+            | SharedDescriptor::ItemBoundary { boundary, content } => {
+                if !matches!(
+                    profile.definition(*boundary)?.trigger,
+                    Trigger::Boundary { .. }
+                ) {
+                    return Err(TableError::WrongTriggerKind {
+                        identifier: *boundary,
+                    });
                 }
-                let entry = payload
-                    .entries
-                    .get(target)
-                    .ok_or(TableError::MissingLexicalDelegateTarget { target: *target })?;
-                for codec in &entry.constructors {
-                    for target_form in codec
-                        .decode_forms
-                        .iter()
-                        .chain(std::iter::once(&codec.encode_form))
-                    {
-                        Self::validate_form_position(
-                            target_form,
-                            inherited,
-                            payload,
-                            profile,
-                            delegate_path,
-                        )?;
+                let child = roles
+                    .get(content)
+                    .ok_or(TableError::MissingRole { role: *content })?;
+                Self::validate_descriptor(child, roles, profile)?;
+            }
+            SharedDescriptor::Repeated { element, .. } => {
+                Self::validate_descriptor(element, roles, profile)?
+            }
+            SharedDescriptor::Atom(atom) => {
+                if let Some(trigger) = atom.trigger {
+                    if !matches!(
+                        profile.definition(trigger)?.trigger,
+                        Trigger::LeadingCharacterClass { .. }
+                    ) {
+                        return Err(TableError::WrongTriggerKind {
+                            identifier: trigger,
+                        });
                     }
                 }
-                delegate_path.remove(&key);
             }
+            SharedDescriptor::Literal(_)
+            | SharedDescriptor::Leaf(_)
+            | SharedDescriptor::Delegate { .. } => {}
         }
         Ok(())
     }
+}
 
-    fn initial_type_triggers(
-        expected: ScopedEncodedTypeId,
-        payload: &TableIdentityPayload,
-        path: &mut BTreeSet<ScopedEncodedTypeId>,
-    ) -> Result<Vec<TriggerIdentifier>, TableError> {
-        if !path.insert(expected) {
-            return Ok(Vec::new());
-        }
-        let entry = payload
-            .entries
-            .get(&expected)
-            .ok_or(TableError::MissingLexicalDelegateTarget { target: expected })?;
-        let mut triggers = Vec::new();
-        for form in entry
-            .constructors
-            .iter()
-            .flat_map(|codec| codec.decode_forms.iter())
-        {
-            Self::initial_form_triggers(form, payload, path, &mut triggers)?;
-        }
-        path.remove(&expected);
-        triggers.sort_unstable();
-        triggers.dedup();
-        Ok(triggers)
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use raw_discovery::TriggerSet;
+
+    use super::*;
+    use crate::codec::{AcceptedDecodeForm, ConstructorCodec};
+    use crate::form::{AtomDescriptor, SharedDescriptor, StructuralRule, UnaryRule};
+    use crate::ids::{DecodeFormId, EncodedConstructorId, ScopedEncodedTypeId};
+
+    fn logos_entry() -> StructuralEntry {
+        let type_id = ScopedEncodedTypeId::logos(3);
+        let rule = StructuralRule::Unary(
+            UnaryRule::new(SharedDescriptor::Atom(AtomDescriptor::any_case())).expect("role"),
+        );
+        StructuralEntry::new(
+            type_id,
+            vec![ConstructorCodec::new(
+                EncodedConstructorId::under(type_id, 1),
+                vec![AcceptedDecodeForm::new(DecodeFormId::new(1), rule.clone())],
+                rule,
+            )],
+        )
     }
 
-    fn initial_form_triggers(
-        form: &StructuralForm,
-        payload: &TableIdentityPayload,
-        path: &mut BTreeSet<ScopedEncodedTypeId>,
-        triggers: &mut Vec<TriggerIdentifier>,
-    ) -> Result<(), TableError> {
-        match form {
-            StructuralForm::Atom(atom) => triggers.extend(atom.trigger),
-            StructuralForm::Leaf(leaf) => triggers.extend(leaf.trigger),
-            StructuralForm::Literal(_) => {}
-            StructuralForm::Application { operator, head, .. } => {
-                triggers.push(*operator);
-                Self::initial_form_triggers(head, payload, path, triggers)?;
-            }
-            StructuralForm::Delimited { boundary, .. } => triggers.push(*boundary),
-            StructuralForm::Delegate { target, .. } => {
-                triggers.extend(Self::initial_type_triggers(*target, payload, path)?);
-            }
-        }
-        Ok(())
-    }
+    #[test]
+    fn wrong_language_and_profile_identity_are_refused_at_seal() {
+        let profile = crate::fixture::FixtureBuilder::token_profile();
+        let base = TableIdentityPayload::new(
+            EncodedLanguage::Schema,
+            TargetLayoutIdentity::derive(b"test target layout"),
+            profile.identity(),
+            StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
+            TriggerSet::new(vec![]),
+            BTreeMap::from([(logos_entry().encoded_type(), logos_entry())]),
+        );
+        assert!(matches!(
+            AddressedStructuralTable::seal(base, &profile),
+            Err(TableError::LanguageMismatch { .. })
+        ));
 
-    fn seal_position(
-        profile: &SealedTokenProfile,
-        trivia: &TriggerSet,
-        inherited: &[TriggerIdentifier],
-        own: Option<TriggerIdentifier>,
-    ) -> Result<(), TokenProfileError> {
-        let mut triggers = trivia.triggers().to_vec();
-        triggers.extend_from_slice(inherited);
-        triggers.extend(own);
-        profile.seal_trigger_set(TriggerSet::new(triggers))?;
-        Ok(())
-    }
-
-    fn boundary_terminators(
-        profile: &SealedTokenProfile,
-        candidates: &[TriggerIdentifier],
-    ) -> Result<Vec<TriggerIdentifier>, TokenProfileError> {
-        let mut boundaries = Vec::new();
-        for identifier in candidates {
-            if matches!(
-                profile.definition(*identifier)?.trigger,
-                Trigger::Boundary { .. }
-            ) {
-                boundaries.push(*identifier);
-            }
-        }
-        boundaries.sort_unstable();
-        boundaries.dedup();
-        Ok(boundaries)
-    }
-
-    fn require_trigger_kind(
-        profile: &SealedTokenProfile,
-        identifier: TriggerIdentifier,
-        expected: &'static str,
-        accepts: impl FnOnce(&Trigger) -> bool,
-    ) -> Result<(), TableError> {
-        let definition = profile.definition(identifier)?;
-        if !accepts(&definition.trigger) {
-            return Err(TableError::WrongTriggerKind {
-                identifier,
-                expected,
-            });
-        }
-        Ok(())
+        let other_profile = raw_discovery::RawProfile::nomos_extended()
+            .seal()
+            .expect("valid alternate profile");
+        let zero: TableIdentityPayload = TableIdentityPayload::new(
+            EncodedLanguage::Schema,
+            TargetLayoutIdentity::derive(b"test target layout"),
+            other_profile.identity(),
+            StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
+            TriggerSet::new(vec![]),
+            BTreeMap::new(),
+        );
+        assert!(matches!(
+            AddressedStructuralTable::seal(zero, &profile),
+            Err(TableError::TokenProfileIdentityMismatch)
+        ));
     }
 }

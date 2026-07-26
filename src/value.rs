@@ -1,65 +1,127 @@
-//! The evaluator's generic structural value type: a Core-agnostic representation of a
-//! decoded value. A generated codec recovers the concrete Core type (§4.5), and the
-//! conformance laws prove the two agree. The value type is content-identifiable; the
-//! delimiter-only law witnesses that changing delimiters leaves its identity unmoved.
+//! The evaluator result: a constructor-tagged, role-keyed structural mirror.
 
-use content_identity::{ContentHash, DomainSeparation, HashDomain, LayoutVersion};
+use std::collections::BTreeMap;
+
+use content_identity::{ArchiveError, ContentHash, DomainSeparation, HashDomain, LayoutVersion};
 use name_table::Identifier;
-use raw_discovery::{Atom, Block};
+use raw_discovery::{Atom, Block, PipeText};
 
-use content_identity::ArchiveError;
+use crate::error::AuthoringError;
+use crate::ids::{EncodedConstructorId, FieldRole, StableRoleId};
 
-/// A generic structural value — the value type both evaluator directions use.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 #[rkyv(
     serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source),
     deserialize_bounds(__D::Error: rkyv::rancor::Source),
     bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
 )]
-pub enum StructuralValue {
-    /// A resolved name.
+pub enum FieldValue {
     Atom(Identifier),
-    /// A flattened scalar leaf.
     Scalar(ScalarValue),
-    /// A delimited run of children. The delimiter itself is NOT stored: delimiter-only
-    /// table revisions preserve the StructuralValue mirror hash; structural
-    /// respellings move it by design (law 4).
-    /// This deviates from §4.4's pre-hardening sketch, which carried the delimiter.
-    Delimited(#[rkyv(omit_bounds)] Vec<StructuralValue>),
-    /// A right-associative application.
-    Application(
-        #[rkyv(omit_bounds)] Box<StructuralValue>,
-        #[rkyv(omit_bounds)] Box<StructuralValue>,
-    ),
-    /// Passed through a transparent delegate wrapper. Every wrapper level is a
-    /// distinct `Delegated` layer, so delegation constructs the whole chain.
-    Delegated(#[rkyv(omit_bounds)] Box<StructuralValue>),
-    /// Which disjoint constructor of the expected type matched, and its payload.
-    Chosen {
-        constructor: u32,
+    Delimited(#[rkyv(omit_bounds)] Box<FieldValue>),
+    Application {
         #[rkyv(omit_bounds)]
-        payload: Box<StructuralValue>,
+        head: Box<FieldValue>,
+        #[rkyv(omit_bounds)]
+        payload: Box<FieldValue>,
     },
-    /// The empty product.
-    Empty,
+    Delegated(#[rkyv(omit_bounds)] Box<StructuralValue>),
+    Repeated(#[rkyv(omit_bounds)] Vec<FieldValue>),
+}
+
+/// A generic mirror keyed by archived stable role ids, never by a fixed field
+/// index. Manual `Textual::reify`/`reflect` can name a compile-time role directly.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct RoleKeyedMirror {
+    values: BTreeMap<StableRoleId, FieldValue>,
+}
+
+impl RoleKeyedMirror {
+    pub(crate) fn insert(&mut self, role: StableRoleId, value: FieldValue) {
+        self.values.insert(role, value);
+    }
+
+    pub fn value<Role: FieldRole>(&self) -> Option<&FieldValue> {
+        self.values.get(&StableRoleId::for_role::<Role>())
+    }
+
+    pub(crate) fn value_by_stable_role(&self, role: StableRoleId) -> Option<&FieldValue> {
+        self.values.get(&role)
+    }
+}
+
+/// Checked authoring state for a manual encoded-value mirror. Only a typed
+/// field-role can add a value, so external `Textual::reflect` code never
+/// writes a raw stable id or an untyped map entry.
+#[derive(Clone, Debug)]
+pub struct StructuralValueRecord {
+    constructor: EncodedConstructorId,
+    fields: RoleKeyedMirror,
+}
+
+impl StructuralValueRecord {
+    pub fn insert<Role: FieldRole>(
+        &mut self,
+        value: FieldValue,
+    ) -> Result<&mut Self, AuthoringError> {
+        let role = StableRoleId::for_role::<Role>();
+        if role.value() == 0 {
+            return Err(AuthoringError::ZeroRoleIdentity);
+        }
+        if self.fields.values.contains_key(&role) {
+            return Err(AuthoringError::DuplicateRoleIdentity { role });
+        }
+        self.fields.insert(role, value);
+        Ok(self)
+    }
+
+    /// Finish the checked, typed-role mirror for shared evaluation.
+    pub fn finish(self) -> StructuralValue {
+        StructuralValue::new(self.constructor, self.fields)
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
+pub struct StructuralValue {
+    constructor: EncodedConstructorId,
+    fields: RoleKeyedMirror,
 }
 
 impl StructuralValue {
-    pub fn chosen(constructor: u32, payload: StructuralValue) -> Self {
-        Self::Chosen {
+    /// Start a checked manual mirror for the selected constructor. Each field
+    /// is added with [`StructuralValueRecord::insert`], whose role is a Rust
+    /// type rather than an integer key.
+    pub fn record(constructor: EncodedConstructorId) -> StructuralValueRecord {
+        StructuralValueRecord {
             constructor,
-            payload: Box::new(payload),
+            fields: RoleKeyedMirror::default(),
         }
     }
 
-    /// The content identity of this value, under its own hash domain. Delimiter-only
-    /// table revisions preserve this hash; other structural respellings may move it.
+    pub(crate) fn new(constructor: EncodedConstructorId, fields: RoleKeyedMirror) -> Self {
+        Self {
+            constructor,
+            fields,
+        }
+    }
+
+    pub fn constructor(&self) -> EncodedConstructorId {
+        self.constructor
+    }
+    pub fn fields(&self) -> &RoleKeyedMirror {
+        &self.fields
+    }
+
+    /// Retrieve a manual mirror field through its typed role.
+    pub fn field<Role: FieldRole>(&self) -> Option<&FieldValue> {
+        self.fields.value::<Role>()
+    }
+
     pub fn content_identity(&self) -> Result<ContentHash<StructuralValueDomain>, ArchiveError> {
         ContentHash::of_core(self)
     }
 }
 
-/// A flattened scalar leaf value.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub enum ScalarValue {
     Integer(i64),
@@ -69,54 +131,28 @@ pub enum ScalarValue {
 }
 
 impl ScalarValue {
-    /// Render this scalar back to a raw block. Numeric and boolean scalars use the
-    /// dotted rejoin; text follows the canonical string law: bare dotted text when
-    /// possible, parenthesized words when spaces require it, and pipe text otherwise.
-    pub fn render_block(&self) -> Block {
+    pub(crate) fn render_block(&self) -> Block {
         match self {
             Self::Integer(value) => Self::render_dotted(&value.to_string()),
             Self::Float(value) => Self::render_dotted(&value.to_string()),
             Self::Boolean(value) => Self::render_dotted(&value.to_string()),
-            Self::Text(value) => Self::render_text(value),
+            Self::Text(value) if Self::bare_dotted(value) => Self::render_dotted(value),
+            Self::Text(value) => Block::PipeText(PipeText::new(value)),
         }
     }
 
-    fn render_text(value: &str) -> Block {
-        if Self::qualifies_as_bare_dotted_text(value) {
-            return Self::render_dotted(value);
-        }
-        if Self::qualifies_as_parenthesized_text(value) {
-            return Block::Delimited {
-                delimiter: raw_discovery::Delimiter::Parenthesis,
-                root_objects: value.split(' ').map(Self::render_dotted).collect(),
-            };
-        }
-        Block::PipeText(raw_discovery::PipeText::new(value))
-    }
-
-    fn qualifies_as_bare_dotted_text(value: &str) -> bool {
+    fn bare_dotted(value: &str) -> bool {
         !value.is_empty()
-            && !value.contains(";;")
             && value
                 .split('.')
-                .all(|segment| !segment.is_empty() && Atom::new(segment).qualifies_as_symbol())
-    }
-
-    fn qualifies_as_parenthesized_text(value: &str) -> bool {
-        value.contains(' ')
-            && !value
-                .chars()
-                .any(|character| character.is_whitespace() && character != ' ')
-            && value.split(' ').all(Self::qualifies_as_bare_dotted_text)
+                .all(|part| Atom::new(part).qualifies_as_symbol())
     }
 
     fn render_dotted(text: &str) -> Block {
         let segments: Vec<&str> = text.split('.').collect();
-        let (last, leading) = segments
-            .split_last()
-            .expect("a split string always has one segment");
+        let (last, rest) = segments.split_last().expect("non-empty text");
         let mut block = Block::Atom(Atom::new(*last));
-        for segment in leading.iter().rev() {
+        for segment in rest.iter().rev() {
             block = Block::Application {
                 head: Box::new(Block::Atom(Atom::new(*segment))),
                 payload: Box::new(block),
@@ -126,14 +162,15 @@ impl ScalarValue {
     }
 }
 
-/// The hash domain for structural mirror values, layout-version tagged.
+/// Layout two is required because the archived mirror changed from an unkeyed
+/// product/tree to constructor plus role-keyed values.
 pub struct StructuralValueDomain;
 
 impl HashDomain for StructuralValueDomain {
     fn separation() -> DomainSeparation {
         DomainSeparation::Contextual {
             context: "structural-codec 2026 structural mirror value",
-            layout: LayoutVersion::new(1),
+            layout: LayoutVersion::new(2),
         }
     }
 }

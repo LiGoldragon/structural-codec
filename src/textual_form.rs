@@ -1,6 +1,6 @@
 //! [`TextualForm`] is the textual view value for an encoded form. [`Textual`] is the
 //! textual interface that produces and consumes that view. It is the textual side of the
-//! Protos pairing beside [`EncodedForm`](crate::EncodedForm) and
+//! Protos pairing beside [`EncodedForm`] and
 //! [`EncodedConversion`](crate::EncodedConversion).
 //!
 //! ## The textual interface
@@ -31,15 +31,17 @@
 //! [`EncodedForm<T>`](crate::EncodedForm) carries, so a language's encoded form, textual
 //! view, and conversions all agree on one marker.
 //!
-//! [`StructuralForm`]: crate::form::StructuralForm
+//! [`SharedDescriptor`]: crate::form::SharedDescriptor
 
 use std::marker::PhantomData;
 
-use name_table::{NameResolver, NameTable, NameTableError, NameTransaction};
+use name_table::{NameTable, NameTableError, NameTransaction};
 use raw_discovery::SealedTokenProfile;
 
+use crate::encoded_form::EncodedForm;
 use crate::error::{DecodeError, EncodeError, SingleChunkRequired};
 use crate::evaluator::StructuralEvaluator;
+use crate::form::{StructuralRule, StructureRecord};
 use crate::ids::ScopedEncodedTypeId;
 use crate::table::AddressedStructuralTable;
 use crate::value::StructuralValue;
@@ -116,9 +118,14 @@ impl<Language> TextualForm<Language> {
 /// [`reflect`](Self::reflect) translation between the generic structural value and the
 /// encoded form. [`view`](Self::view) and [`unview`](Self::unview) are provided for every
 /// language.
-pub trait Textual {
+pub trait Textual<Record = StructuralRule>
+where
+    Record: StructureRecord,
+{
     /// The EncodedForm this text is a view on — a stringless Core value family.
-    type Encoded;
+    /// Rust can express the fixed association directly: an implementation's
+    /// encoded family and textual view carry exactly the same language marker.
+    type Encoded: EncodedForm<Language = Self::Language>;
 
     /// The language marker `T` shared with the produced [`TextualForm<T>`] value and the
     /// paired [`EncodedForm<T>`](crate::EncodedForm).
@@ -134,15 +141,15 @@ pub trait Textual {
 
     /// The structuretree: the sealed table the trusted evaluator walks in both directions.
     /// This data defines the encoder and decoder.
-    fn structuretree(&self) -> &AddressedStructuralTable;
+    fn structuretree(&self) -> &AddressedStructuralTable<Record>;
 
     /// The separately sealed token profile whose identity the structuretree
     /// pins. It supplies every textual boundary spelling and carrier policy.
     fn token_profile(&self) -> &SealedTokenProfile;
 
-    /// The lexicon the table's [`Literal`](crate::form::StructuralForm::Literal) forms
+    /// The lexicon the table's [`Literal`](crate::form::SharedDescriptor::Literal) descriptors
     /// resolve through; `None` when the table carries no literal keywords.
-    fn lexicon(&self) -> Option<&dyn NameResolver> {
+    fn lexicon(&self) -> Option<&NameTable> {
         None
     }
 
@@ -171,14 +178,16 @@ pub trait Textual {
 
     /// The trusted evaluator over the nametree and structuretree, with the literal lexicon
     /// when the table carries `Literal` forms and without it otherwise.
-    fn evaluator(&self) -> StructuralEvaluator<'_> {
+    fn evaluator(&self) -> Result<StructuralEvaluator<'_, Record>, Self::Error> {
         match self.lexicon() {
             Some(lexicon) => StructuralEvaluator::with_profile_and_lexicon(
                 self.structuretree(),
                 self.token_profile(),
                 lexicon,
-            ),
-            None => StructuralEvaluator::with_profile(self.structuretree(), self.token_profile()),
+            )
+            .map_err(Self::Error::from),
+            None => StructuralEvaluator::with_profile(self.structuretree(), self.token_profile())
+                .map_err(Self::Error::from),
         }
     }
 
@@ -196,7 +205,7 @@ pub trait Textual {
         if text.is_empty() {
             return Err(self.missing_root_object());
         }
-        let evaluator = self.evaluator();
+        let evaluator = self.evaluator()?;
         names.try_intern(|transaction| {
             let mirror = evaluator
                 .decode_text_with_interner(expected, text, transaction)
@@ -216,7 +225,7 @@ pub trait Textual {
         names: &NameTable,
     ) -> Result<TextualForm<Self::Language>, Self::Error> {
         let mirror = self.reflect(expected, encoded, names)?;
-        let text = self.evaluator().encode_text(expected, &mirror, names)?;
+        let text = self.evaluator()?.encode_text(expected, &mirror, names)?;
         Ok(TextualForm::single(text))
     }
 }
