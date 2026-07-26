@@ -311,7 +311,7 @@ impl StructuralEvaluator<'_> {
             (StructuralForm::Literal(identifier), PreflightRegion::Terminal(region)) => {
                 let mut reading = TextReading::within(source, region);
                 let text = self.read_position_text(&mut reading, &[], None)?;
-                let lexicon = self.lexicon.ok_or(DecodeError::LiteralMismatch)?;
+                let lexicon = self.lexicon.ok_or(DecodeError::MissingLexicon)?;
                 let expected = lexicon.resolve(*identifier)?;
                 if expected.as_str() != text {
                     return Err(DecodeError::LiteralMismatch);
@@ -457,9 +457,7 @@ impl StructuralEvaluator<'_> {
                 let PreflightRegion::Terminal(terminal) = region else {
                     unreachable!("terminal preflight always returns a terminal region")
                 };
-                let Some(lexicon) = self.lexicon else {
-                    return Err(PreflightError::NotMatched);
-                };
+                let lexicon = self.lexicon.ok_or(DecodeError::MissingLexicon)?;
                 let Ok(expected) = lexicon.resolve(*identifier) else {
                     return Err(PreflightError::NotMatched);
                 };
@@ -869,18 +867,20 @@ impl StructuralEvaluator<'_> {
     }
 
     fn committed_text_error(error: &DecodeError) -> bool {
-        matches!(error, DecodeError::BoundedInterior { .. })
-            || matches!(
-                error,
-                DecodeError::TokenProfile(
-                    raw_discovery::TokenProfileError::UnclosedBoundary { .. }
-                        | raw_discovery::TokenProfileError::MismatchedBoundary { .. }
-                        | raw_discovery::TokenProfileError::UnclosedCarrier { .. }
-                        | raw_discovery::TokenProfileError::InvalidSourceBound { .. }
-                        | raw_discovery::TokenProfileError::InactiveBoundary { .. }
-                        | raw_discovery::TokenProfileError::UnsupportedBoundaryDiscoveryTrigger(_)
-                )
+        matches!(
+            error,
+            DecodeError::MissingLexicon | DecodeError::BoundedInterior { .. }
+        ) || matches!(
+            error,
+            DecodeError::TokenProfile(
+                raw_discovery::TokenProfileError::UnclosedBoundary { .. }
+                    | raw_discovery::TokenProfileError::MismatchedBoundary { .. }
+                    | raw_discovery::TokenProfileError::UnclosedCarrier { .. }
+                    | raw_discovery::TokenProfileError::InvalidSourceBound { .. }
+                    | raw_discovery::TokenProfileError::InactiveBoundary { .. }
+                    | raw_discovery::TokenProfileError::UnsupportedBoundaryDiscoveryTrigger(_)
             )
+        )
     }
 
     fn position_is_complete(
@@ -1306,7 +1306,9 @@ impl StructuralEvaluator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::fixture::FixtureBuilder;
+    use name_table::{IdentifierNamespace, Name, NameTable};
 
     #[test]
     fn completion_lookahead_leaves_separator_trivia_for_its_parent() {
@@ -1322,5 +1324,39 @@ mod tests {
                 .expect("completion lookahead")
         );
         assert_eq!(reading.mark(), "Head".len());
+    }
+
+    #[test]
+    fn literal_text_boundary_distinguishes_missing_lexicon_from_spelling_mismatch() {
+        let table = FixtureBuilder::new().build().expect("fixture table");
+        let profile = FixtureBuilder::token_profile();
+        let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+        let literal = lexicon
+            .intern(Name::new("ExpectedLiteral"))
+            .expect("literal spelling");
+        let form = StructuralForm::Literal(literal);
+        let mut reading = TextReading::new("ExpectedLiteral");
+
+        assert!(matches!(
+            StructuralEvaluator::with_profile(&table, &profile).preflight_text_form(
+                &form,
+                &mut reading,
+                &[],
+                &[],
+                false,
+                &[],
+            ),
+            Err(PreflightError::Malformed(DecodeError::MissingLexicon))
+        ));
+        assert!(matches!(
+            StructuralEvaluator::with_profile_and_lexicon(&table, &profile, &lexicon)
+                .decode_preflighted_form(
+                    &form,
+                    PreflightRegion::Terminal(SourceBound::whole("DifferentLiteral")),
+                    "DifferentLiteral",
+                    &[],
+                ),
+            Err(DecodeError::LiteralMismatch)
+        ));
     }
 }

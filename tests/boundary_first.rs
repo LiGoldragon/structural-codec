@@ -726,6 +726,29 @@ fn literal_headed_alternatives_check_the_configured_spelling_before_payload() {
 }
 
 #[test]
+fn literal_text_decode_reports_a_missing_lexicon() {
+    let profile = RawProfile::standard().seal().expect("standard profile");
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let derive = one_name(&mut lexicon, "Derive");
+    let form = literal_application(
+        derive,
+        delimited(BRACE, Delimiter::Brace, SequenceForm::Product(Vec::new())),
+    );
+    let table = table(
+        &profile,
+        TriggerSet::new(vec![WHITESPACE, COMMENT]),
+        [entry(OUTER, form)],
+    );
+    let evaluator = StructuralEvaluator::with_profile(&table, &profile);
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+
+    assert!(matches!(
+        evaluator.decode_text(OUTER, "Derive.{}", &mut names),
+        Err(DecodeError::MissingLexicon)
+    ));
+}
+
+#[test]
 fn payload_non_match_allows_a_later_disjoint_application_alternative() {
     let profile = RawProfile::standard().seal().expect("standard profile");
     let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);

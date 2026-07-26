@@ -162,11 +162,15 @@ impl<'table> StructuralEvaluator<'table> {
 
         for codec in &entry.constructors {
             for form in &codec.decode_forms {
-                if let Ok(draft) = self.match_form(form, block, &child_chain) {
-                    return Ok(DecodeDraft::Chosen {
-                        constructor: codec.constructor.constructor,
-                        payload: Box::new(draft),
-                    });
+                match self.match_form(form, block, &child_chain) {
+                    Ok(draft) => {
+                        return Ok(DecodeDraft::Chosen {
+                            constructor: codec.constructor.constructor,
+                            payload: Box::new(draft),
+                        });
+                    }
+                    Err(DecodeError::MissingLexicon) => return Err(DecodeError::MissingLexicon),
+                    Err(_) => {}
                 }
             }
         }
@@ -198,7 +202,7 @@ impl<'table> StructuralEvaluator<'table> {
                     expected: "atom",
                     found: Self::block_kind(block),
                 })?;
-                let lexicon = self.lexicon.ok_or(DecodeError::LiteralMismatch)?;
+                let lexicon = self.lexicon.ok_or(DecodeError::MissingLexicon)?;
                 let name = lexicon.resolve(*identifier)?;
                 if name.as_str() == atom.text() {
                     Ok(DecodeDraft::Atom(atom.text().to_owned()))
@@ -497,5 +501,45 @@ impl<'table> StructuralEvaluator<'table> {
                 .map(|child| self.encode_form_walk(element, child, resolver))
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use name_table::{IdentifierNamespace, Name, NameTable};
+    use raw_discovery::Recognizer;
+
+    use crate::fixture::FixtureBuilder;
+
+    fn atom_block(source: &str) -> Block {
+        Recognizer::standard()
+            .recognize(source)
+            .expect("recognized atom")
+            .root_object_at(0)
+            .expect("root atom")
+            .clone()
+    }
+
+    #[test]
+    fn literal_match_distinguishes_missing_lexicon_from_spelling_mismatch() {
+        let table = FixtureBuilder::new().build().expect("fixture table");
+        let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+        let literal = lexicon
+            .intern(Name::new("ExpectedLiteral"))
+            .expect("literal spelling");
+        let form = StructuralForm::Literal(literal);
+        let expected = atom_block("ExpectedLiteral");
+        let mismatched = atom_block("DifferentLiteral");
+
+        assert!(matches!(
+            StructuralEvaluator::new(&table).match_form(&form, &expected, &[]),
+            Err(DecodeError::MissingLexicon)
+        ));
+        assert!(matches!(
+            StructuralEvaluator::with_lexicon(&table, &lexicon).match_form(&form, &mismatched, &[]),
+            Err(DecodeError::LiteralMismatch)
+        ));
     }
 }

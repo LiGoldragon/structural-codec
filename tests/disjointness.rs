@@ -9,10 +9,10 @@ use structural_codec::fixture::{
     APPLICATION_OPERATOR, BRACE_BOUNDARY, COMMENT_TRIVIA, FIELD, FixtureBuilder, WHITESPACE_TRIVIA,
 };
 use structural_codec::{
-    AddressedStructuralTable, AtomCase, AtomForm, ConstructorCodec, DelegationPayload, EncodeError,
-    EncodedConstructorId, EncodedLayoutIdentity, PositionalSignature, RawProfileIdentity,
-    ScopedEncodedTypeId, StructuralEntry, StructuralEvaluator, StructuralForm, StructuralValue,
-    TableError, TableIdentityPayload,
+    AddressedStructuralTable, AtomCase, AtomForm, ConstructorCodec, DecodeError, DelegationPayload,
+    EncodeError, EncodedConstructorId, EncodedLayoutIdentity, PositionalSignature,
+    RawProfileIdentity, ScopedEncodedTypeId, StructuralEntry, StructuralEvaluator, StructuralForm,
+    StructuralValue, TableError, TableIdentityPayload,
 };
 
 fn entry_with_forms(forms: Vec<StructuralForm>) -> StructuralEntry {
@@ -346,6 +346,30 @@ fn literal_and_unconstrained_name_atom_are_rejected() {
         sealed_table(entry).is_err(),
         "sealing rejects literal/name-atom overlap"
     );
+}
+
+#[test]
+fn direct_literal_decode_reports_a_missing_lexicon() {
+    let mut lexicon = NameTable::new(IdentifierNamespace::Fixture);
+    let literal = lexicon
+        .intern(Name::new("ExpectedLiteral"))
+        .expect("literal spelling");
+    let table = sealed_table(entry_with_forms(vec![StructuralForm::Literal(literal)]))
+        .expect("single literal table seals");
+    let document = Recognizer::standard()
+        .recognize("ExpectedLiteral")
+        .expect("recognized literal");
+    let block = document.root_object_at(0).expect("literal root");
+    let mut names = NameTable::new(IdentifierNamespace::Fixture);
+
+    assert!(matches!(
+        StructuralEvaluator::new(&table).decode(
+            ScopedEncodedTypeId::fixture(100),
+            block,
+            &mut names
+        ),
+        Err(DecodeError::MissingLexicon)
+    ));
 }
 
 #[test]

@@ -75,6 +75,8 @@ pub enum DecodeError {
     },
     #[error("atom case did not match the expected form")]
     CaseMismatch,
+    #[error("literal decoding requires a configured lexicon")]
+    MissingLexicon,
     #[error("literal atom did not match the expected interned keyword")]
     LiteralMismatch,
     #[error("the delegated position did not satisfy its typed direction {payload:?}")]
