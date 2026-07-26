@@ -1,6 +1,6 @@
 //! The one shared, source-bounded evaluator over archived typed records.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -12,6 +12,7 @@ use raw_discovery::{
     TriggerMatchKind,
 };
 
+use crate::codec::StructuralEntry;
 use crate::error::{DecodeError, EncodeError};
 use crate::form::{
     BorrowedFieldView, FieldVisitor, LeafCodec, Position, SharedDescriptor, StructuralRule,
@@ -53,6 +54,36 @@ impl DecodeState {
             .get(&role)
             .ok_or(DecodeError::MissingRole { role })
     }
+}
+
+/// The structural continuation that proves a decoded type form is complete.
+///
+/// A type may occupy the whole current bound, the head before an enclosing
+/// operator, or one element in a repeated interior.  Alternative selection
+/// uses this local continuation; it never assigns precedence to table order.
+#[derive(Clone, Copy)]
+enum DecodeContinuation<'source> {
+    Bound,
+    Before(&'source str),
+    Repeated,
+}
+
+impl<'source> DecodeContinuation<'source> {
+    fn terminator(self) -> Option<&'source str> {
+        match self {
+            Self::Bound | Self::Repeated => None,
+            Self::Before(text) => Some(text),
+        }
+    }
+}
+
+/// The continuation and local operator cues carried through one descriptor
+/// walk.  The cues belong to the expected type's accepted forms, never to a
+/// global token scan.
+#[derive(Clone, Copy)]
+struct DecodeScope<'source, 'stops> {
+    continuation: DecodeContinuation<'source>,
+    structural_stops: &'stops [String],
 }
 
 /// One sequential reader inside a source bound already established by pass one.
@@ -137,10 +168,38 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         Ok(self.position == self.bound.end() && self.child_index == self.children.len())
     }
 
+    /// Verify that a type form completed at its enclosing structural
+    /// continuation.  This is deliberately cursor-local: it neither searches
+    /// forward nor assigns an order to accepted forms.
+    fn completes<Record: StructureRecord>(
+        &mut self,
+        evaluator: &StructuralEvaluator<'_, Record>,
+        continuation: DecodeContinuation<'_>,
+    ) -> Result<bool, DecodeError> {
+        match continuation {
+            DecodeContinuation::Bound => self.finish(evaluator),
+            DecodeContinuation::Before(operator) => {
+                Ok(self.source[self.position..self.bound.end()].starts_with(operator))
+            }
+            DecodeContinuation::Repeated => {
+                let before_trivia = self.position;
+                self.skip_trivia(evaluator)?;
+                if self.position != before_trivia {
+                    return Ok(true);
+                }
+                Ok(
+                    (self.position == self.bound.end() && self.child_index == self.children.len())
+                        || self.next_child_at_cursor().is_some(),
+                )
+            }
+        }
+    }
+
     fn take_bare<Record: StructureRecord>(
         &mut self,
         evaluator: &StructuralEvaluator<'_, Record>,
         terminator: Option<&str>,
+        structural_stops: &[String],
     ) -> Result<SourceBound, DecodeError> {
         self.skip_trivia(evaluator)?;
         if self.position == self.bound.end() || self.next_child_at_cursor().is_some() {
@@ -158,6 +217,9 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         let start = self.position;
         while self.position < self.bound.end() {
             if terminator.is_some_and(|text| self.source[self.position..].starts_with(text))
+                || structural_stops
+                    .iter()
+                    .any(|text| self.source[self.position..self.bound.end()].starts_with(text))
                 || self.next_child_at_cursor().is_some()
                 || self.local_match(evaluator)?.is_some()
             {
@@ -339,7 +401,13 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         if cursor.position == cursor.bound.end() {
             return Err(DecodeError::RootObjectCount);
         }
-        let value = self.decode_type(expected, &mut cursor, interner, &[], None)?;
+        let value = self.decode_type(
+            expected,
+            &mut cursor,
+            interner,
+            &[],
+            DecodeContinuation::Bound,
+        )?;
         cursor
             .finish(self)?
             .then_some(value)
@@ -352,7 +420,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         input: &mut BoundedCursor<'_, '_>,
         interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
-        terminator: Option<&str>,
+        continuation: DecodeContinuation<'_>,
     ) -> Result<StructuralValue, DecodeError> {
         if chain.contains(&expected) {
             return Err(DecodeError::DelegationCycle(expected));
@@ -361,6 +429,11 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             .table
             .entry(expected)
             .ok_or(DecodeError::UnknownType(expected))?;
+        let structural_stops = self.alternative_operators(entry)?;
+        let scope = DecodeScope {
+            continuation,
+            structural_stops: &structural_stops,
+        };
         let mut next_chain = chain.to_vec();
         next_chain.push(expected);
         for codec in entry.constructors() {
@@ -374,12 +447,13 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                     &mut state,
                     interner,
                     &next_chain,
-                    terminator,
+                    scope,
                 ) {
-                    Ok(_) => {
+                    Ok(_) if candidate.completes(self, continuation)? => {
                         *input = candidate;
                         return Ok(StructuralValue::new(codec.constructor(), state.fields));
                     }
+                    Ok(_) => {}
                     Err(error) if error.is_structural_non_match() => {}
                     Err(error) => return Err(error),
                 }
@@ -388,6 +462,27 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         Err(DecodeError::NoAlternative {
             core_type: expected,
         })
+    }
+
+    /// The only local lexical cues that can extend a top-level alternative are
+    /// its configured application operators.  A set makes their discovery
+    /// independent of constructor/form vector order; it is used solely as a
+    /// bounded cursor stop, never as a choice priority.
+    fn alternative_operators(
+        &self,
+        entry: &StructuralEntry<Record>,
+    ) -> Result<Vec<String>, DecodeError> {
+        let mut operators = BTreeSet::new();
+        for codec in entry.constructors() {
+            for accepted in codec.decode_forms() {
+                let state = Self::state_for(accepted.rule());
+                let root = accepted.rule().root_role();
+                if let SharedDescriptor::Application { operator, .. } = state.descriptor(root)? {
+                    operators.insert(self.operator_text(*operator)?);
+                }
+            }
+        }
+        Ok(operators.into_iter().collect())
     }
 
     fn state_for(rule: &Record) -> DecodeState {
@@ -408,11 +503,10 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         state: &mut DecodeState,
         interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
-        terminator: Option<&str>,
+        scope: DecodeScope<'_, '_>,
     ) -> Result<FieldValue, DecodeError> {
         let descriptor = state.descriptor(role)?.clone();
-        let value =
-            self.decode_descriptor(&descriptor, input, state, interner, chain, terminator)?;
+        let value = self.decode_descriptor(&descriptor, input, state, interner, chain, scope)?;
         state.fields.insert(role, value.clone());
         Ok(value)
     }
@@ -424,32 +518,47 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         state: &mut DecodeState,
         interner: &mut impl NameInterner,
         chain: &[ScopedEncodedTypeId],
-        terminator: Option<&str>,
+        scope: DecodeScope<'_, '_>,
     ) -> Result<FieldValue, DecodeError> {
         match descriptor {
             SharedDescriptor::Atom(form) => {
-                let atom = self.take_source_atom(input, terminator)?;
+                let atom = self.take_source_atom(
+                    input,
+                    scope.continuation.terminator(),
+                    scope.structural_stops,
+                )?;
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
                 Ok(FieldValue::Atom(interner.intern(Name::new(atom.text()))?))
             }
             SharedDescriptor::Literal(identifier) => {
-                let atom = self.take_source_atom(input, terminator)?;
+                let atom = self.take_source_atom(
+                    input,
+                    scope.continuation.terminator(),
+                    scope.structural_stops,
+                )?;
                 let lexicon = self.lexicon.ok_or(DecodeError::MissingLexicon)?;
                 if lexicon.resolve(*identifier)?.as_str() != atom.text() {
                     return Err(DecodeError::LiteralMismatch);
                 }
                 Ok(FieldValue::Atom(*identifier))
             }
-            SharedDescriptor::Leaf(codec) => Ok(FieldValue::Scalar(
-                self.decode_leaf(codec, input, terminator)?,
-            )),
+            SharedDescriptor::Leaf(codec) => Ok(FieldValue::Scalar(self.decode_leaf(
+                codec,
+                input,
+                scope.continuation.terminator(),
+                scope.structural_stops,
+            )?)),
             SharedDescriptor::Delegate { target, payload } => {
                 if let Some(payload) = payload {
                     let mut preview = input.clone();
                     let atom = self
-                        .take_source_atom(&mut preview, terminator)
+                        .take_source_atom(
+                            &mut preview,
+                            scope.continuation.terminator(),
+                            scope.structural_stops,
+                        )
                         .map_err(|_| DecodeError::DelegationPayloadMismatch {
                             payload: *payload,
                         })?;
@@ -458,7 +567,11 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                     }
                 }
                 Ok(FieldValue::Delegated(Box::new(self.decode_type(
-                    *target, input, interner, chain, terminator,
+                    *target,
+                    input,
+                    interner,
+                    chain,
+                    scope.continuation,
                 )?)))
             }
             SharedDescriptor::Application {
@@ -467,11 +580,19 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                 payload,
             } => {
                 let operator_text = self.operator_text(*operator)?;
-                let head =
-                    self.decode_role(*head, input, state, interner, chain, Some(&operator_text))?;
+                let head = self.decode_role(
+                    *head,
+                    input,
+                    state,
+                    interner,
+                    chain,
+                    DecodeScope {
+                        continuation: DecodeContinuation::Before(&operator_text),
+                        structural_stops: scope.structural_stops,
+                    },
+                )?;
                 input.consume_operator(self, *operator)?;
-                let payload =
-                    self.decode_role(*payload, input, state, interner, chain, terminator)?;
+                let payload = self.decode_role(*payload, input, state, interner, chain, scope)?;
                 Ok(FieldValue::Application {
                     head: Box::new(head),
                     payload: Box::new(payload),
@@ -514,7 +635,17 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         let mut values = Vec::new();
         while !input.finish(self)? {
             let before = input.position;
-            values.push(self.decode_descriptor(&element, input, state, interner, chain, None)?);
+            values.push(self.decode_descriptor(
+                &element,
+                input,
+                state,
+                interner,
+                chain,
+                DecodeScope {
+                    continuation: DecodeContinuation::Repeated,
+                    structural_stops: &[],
+                },
+            )?);
             if input.position == before {
                 return Err(DecodeError::LeafNotFlattenable);
             }
@@ -532,8 +663,9 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         &self,
         input: &mut BoundedCursor<'_, '_>,
         terminator: Option<&str>,
+        structural_stops: &[String],
     ) -> Result<Atom, DecodeError> {
-        let bound = input.take_bare(self, terminator)?;
+        let bound = input.take_bare(self, terminator, structural_stops)?;
         let text = input.text(bound);
         if text.contains('.') {
             return Err(DecodeError::BlockKindMismatch {
@@ -549,6 +681,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         codec: &LeafCodec,
         input: &mut BoundedCursor<'_, '_>,
         terminator: Option<&str>,
+        structural_stops: &[String],
     ) -> Result<ScalarValue, DecodeError> {
         let mut carrier = input.clone();
         if let Some(body) = carrier.take_carrier(self)? {
@@ -564,7 +697,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                 found: "source",
             });
         }
-        let bound = input.take_bare(self, terminator)?;
+        let bound = input.take_bare(self, terminator, structural_stops)?;
         let text = input.text(bound);
         match codec {
             LeafCodec::Integer => {

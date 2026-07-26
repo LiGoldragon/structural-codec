@@ -5,6 +5,11 @@
 use std::collections::BTreeMap;
 
 use name_table::{IdentifierNamespace, Name, NameTable, NameTableError};
+use raw_discovery::{
+    BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext,
+    BoundaryDiscoveryContextIdentifier, CharacterSet, ProfileRevision, TokenProfileData, Trigger,
+    TriggerDefinition, TriggerIdentifier, TriggerSet,
+};
 
 use crate::fixture::{APPLICATION_OPERATOR, BRACE_BOUNDARY};
 use crate::{
@@ -23,22 +28,30 @@ fn unary(descriptor: SharedDescriptor) -> StructuralRule {
 }
 
 fn application(head: SharedDescriptor, payload: SharedDescriptor) -> StructuralRule {
+    application_with_operator(APPLICATION_OPERATOR, head, payload)
+}
+
+fn application_with_operator(
+    operator: TriggerIdentifier,
+    head: SharedDescriptor,
+    payload: SharedDescriptor,
+) -> StructuralRule {
     StructuralRule::Application(
-        ApplicationRule::new(APPLICATION_OPERATOR, head, payload).expect("built-in roles"),
+        ApplicationRule::new(operator, head, payload).expect("built-in roles"),
     )
 }
 
 fn application_delimited(head: SharedDescriptor) -> StructuralRule {
+    application_delimited_with_element(head, SharedDescriptor::Atom(AtomDescriptor::any_case()))
+}
+
+fn application_delimited_with_element(
+    head: SharedDescriptor,
+    element: SharedDescriptor,
+) -> StructuralRule {
     StructuralRule::ApplicationDelimited(
-        ApplicationDelimitedRule::new(
-            APPLICATION_OPERATOR,
-            BRACE_BOUNDARY,
-            head,
-            SharedDescriptor::Atom(AtomDescriptor::any_case()),
-            0,
-            None,
-        )
-        .expect("built-in roles"),
+        ApplicationDelimitedRule::new(APPLICATION_OPERATOR, BRACE_BOUNDARY, head, element, 0, None)
+            .expect("built-in roles"),
     )
 }
 
@@ -464,7 +477,7 @@ fn accepted_application_payload_non_match_falls_through_to_the_disjoint_form() {
 fn constructor_and_form_vector_order_never_select_meaning() {
     let application_rule = application(
         SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
-        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::CamelCase)),
     );
     let bare_rule = atom(AtomCase::PascalCase);
     let make = |reverse: bool| {
@@ -483,9 +496,19 @@ fn constructor_and_form_vector_order_never_select_meaning() {
         seal_entry(entry(TYPE, codecs)).expect("disjoint table")
     };
     let profile = crate::fixture::FixtureBuilder::token_profile();
+    let mut encodings = Vec::new();
     for table in [make(false), make(true)] {
         let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
         let mut names = NameTable::new(IdentifierNamespace::Fixture);
+        let application = evaluator
+            .decode_text(TYPE, "Head.payload", &mut names)
+            .expect("application alternative after an atom prefix");
+        assert_eq!(application.constructor().local(), 9);
+        encodings.push(
+            evaluator
+                .encode_text(TYPE, &application, &names)
+                .expect("canonical application encode"),
+        );
         assert_eq!(
             evaluator
                 .decode_text(TYPE, "Entry", &mut names)
@@ -493,6 +516,173 @@ fn constructor_and_form_vector_order_never_select_meaning() {
                 .constructor()
                 .local(),
             7
+        );
+
+        let before_bytes = names.to_archive_bytes().expect("archive before refusal");
+        let before_identity = names.identity().expect("identity before refusal");
+        assert!(matches!(
+            evaluator.decode_text(TYPE, "Head.", &mut names),
+            Err(DecodeError::NoAlternative { core_type }) if core_type == TYPE
+        ));
+        assert_eq!(
+            names
+                .to_archive_bytes()
+                .expect("archive after refusal")
+                .as_ref(),
+            before_bytes.as_ref(),
+            "a rejected prefix candidate must not commit an interned atom"
+        );
+        assert_eq!(
+            names.identity().expect("identity after refusal"),
+            before_identity
+        );
+
+        let unknown = ScopedEncodedTypeId::schema(0xf1ff);
+        assert!(matches!(
+            evaluator.decode_text(unknown, "Head", &mut names),
+            Err(DecodeError::UnknownType(actual)) if actual == unknown
+        ));
+    }
+    assert_eq!(encodings, ["Head.payload", "Head.payload"]);
+}
+
+#[test]
+fn alternative_completion_precedes_the_root_object_check() {
+    let operator = TriggerIdentifier::new(31);
+    let whitespace = TriggerIdentifier::new(32);
+    let root = BoundaryDiscoveryContextIdentifier::new(33);
+    let profile = TokenProfileData::new(
+        ProfileRevision::new(34),
+        vec![
+            TriggerDefinition {
+                identifier: operator,
+                trigger: Trigger::Application {
+                    glyph: " ".to_owned(),
+                },
+            },
+            TriggerDefinition {
+                identifier: whitespace,
+                trigger: Trigger::Whitespace {
+                    canonical_spelling: " ".to_owned(),
+                },
+            },
+        ],
+        TriggerSet::new(vec![whitespace]),
+        CharacterSet::from_text(""),
+    )
+    .seal()
+    .expect("profile with an inactive application operator");
+    let bare_rule = atom(AtomCase::PascalCase);
+    let application_rule = application_with_operator(
+        operator,
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::CamelCase)),
+    );
+    let make = |reverse: bool| {
+        let mut codecs = vec![
+            codec(TYPE, 7, vec![(1, bare_rule.clone())], bare_rule.clone()),
+            codec(
+                TYPE,
+                9,
+                vec![(2, application_rule.clone())],
+                application_rule.clone(),
+            ),
+        ];
+        if reverse {
+            codecs.reverse();
+        }
+        AddressedStructuralTable::seal(
+            TableIdentityPayload::new(
+                EncodedLanguage::Schema,
+                TargetLayoutIdentity::derive(b"completion witness target layout"),
+                profile.identity(),
+                StructuralVocabularyIdentity::fixture(b"completion witness vocabulary"),
+                BlockTreeDiscoveryConfiguration::new(
+                    BoundaryDiscoveryConfiguration::new(
+                        root,
+                        vec![BoundaryDiscoveryContext::new(
+                            root,
+                            TriggerSet::new(vec![whitespace]),
+                        )],
+                        vec![],
+                    ),
+                    vec![],
+                ),
+                crate::TextualRenderingPolicy::new(vec![crate::ContextualTextualPolicy::new(
+                    root,
+                    Some(whitespace),
+                    None,
+                )]),
+                BTreeMap::from([(TYPE, entry(TYPE, codecs))]),
+            ),
+            &profile,
+        )
+        .expect("atom and application forms remain statically disjoint")
+    };
+    for table in [make(false), make(true)] {
+        let evaluator = StructuralEvaluator::new(&table).expect("table evaluator");
+        let mut names = NameTable::new(IdentifierNamespace::Fixture);
+        let value = evaluator
+            .decode_text(TYPE, "Head payload", &mut names)
+            .expect("application is tried after the incomplete atom candidate");
+        assert_eq!(value.constructor().local(), 9);
+        assert_eq!(
+            evaluator
+                .encode_text(TYPE, &value, &names)
+                .expect("canonical space application encode"),
+            "Head payload"
+        );
+    }
+}
+
+#[test]
+fn nested_product_repetition_alternative_requires_local_completion() {
+    let inner = ScopedEncodedTypeId::schema(0xf101);
+    let outer = ScopedEncodedTypeId::schema(0xf102);
+    let application_rule = application(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::CamelCase)),
+    );
+    let bare_rule = atom(AtomCase::PascalCase);
+    let outer_rule = application_delimited_with_element(
+        SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        SharedDescriptor::Delegate {
+            target: inner,
+            payload: None,
+        },
+    );
+    let make = |reverse: bool| {
+        let mut inner_codecs = vec![
+            codec(inner, 7, vec![(1, bare_rule.clone())], bare_rule.clone()),
+            codec(
+                inner,
+                9,
+                vec![(2, application_rule.clone())],
+                application_rule.clone(),
+            ),
+        ];
+        if reverse {
+            inner_codecs.reverse();
+        }
+        seal_entries([
+            entry(inner, inner_codecs),
+            one_constructor(outer, outer_rule.clone()),
+        ])
+        .expect("nested atom and application forms are disjoint")
+    };
+    let profile = crate::fixture::FixtureBuilder::token_profile();
+    for table in [make(false), make(true)] {
+        let evaluator = StructuralEvaluator::with_profile(&table, &profile).expect("profile");
+        let mut names = NameTable::new(IdentifierNamespace::Fixture);
+        let nested = evaluator
+            .decode_text(outer, "Container.{Head.payload}", &mut names)
+            .expect("application in a repeated product payload");
+        assert_eq!(nested.constructor().local(), 1);
+        assert_eq!(
+            evaluator
+                .encode_text(outer, &nested, &names)
+                .expect("nested canonical encode"),
+            "Container.{Head.payload}"
         );
     }
 }
