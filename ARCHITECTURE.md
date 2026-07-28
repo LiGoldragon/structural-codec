@@ -83,9 +83,13 @@ alternative. A `Textual` implementation supplies the table but no parallel
 profile or discovery configuration, and its encoded form is statically
 associated with the same language marker as its textual view.
 
-## Open item
+## Evaluator equivalence witness
 
-Conformance law 5's downstream generated-codec witness remains homeless: the
-former derive repository is frozen and no derive path is revived here. The
-shared evaluator and its conformance harness remain the one current kernel
-surface until that witness has an explicitly authorized home.
+The conformance harness compares an independently implemented codec with the
+table evaluator over the same fixture sources. It checks the structural value,
+the NameTable delta, canonical output, and whether each path accepts or returns
+a typed error. The live witness uses a test-only independently authored Pascal
+atom codec, so both sides exercise name allocation as well as refusal.
+
+The witness lives here with the comparison contract and evaluator it protects.
+The former derive repository stays frozen; no generation path is revived.

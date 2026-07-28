@@ -1,12 +1,11 @@
-//! Law 5 scaffolding: the conformance contract between the trusted evaluator and a
-//! future downstream codec. The `GeneratedCodec` trait is the shape the generated
-//! or independently authored side will implement; the
-//! `ConformanceHarness` exercises it against the evaluator and asserts agreement on
-//! the encoded value, the NameTable delta, the canonical output, and the typed-error
-//! decision. TODAY the evaluator is the sole implementation — this trait has no
-//! generated implementor yet, so the harness is compiled-but-dormant scaffolding.
-//! Its downstream witness remains homeless while the former derive repository is
-//! frozen; this crate does not revive a derive path.
+//! The conformance contract between the trusted evaluator and a generated or
+//! independently authored codec. The `ConformanceHarness` exercises both paths over
+//! the same fixtures and compares the encoded value, the NameTable delta, the
+//! canonical output, and the success-or-typed-error decision.
+//!
+//! A test-only independently authored codec keeps that comparison live in this
+//! crate. A generated implementation remains future work; the former derive
+//! repository stays frozen and no derive path is revived here.
 
 use name_table::{IdentifierNamespace, NameResolver, NameTable, NameTableError};
 use raw_discovery::SealedTokenProfile;
