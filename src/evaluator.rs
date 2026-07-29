@@ -472,6 +472,44 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         Ok(())
     }
 
+    /// Prove an application cue exists after the next structural head unit
+    /// before the head is allowed to perform a semantic name query.
+    ///
+    /// Open repetitions use a failed application attempt to find the boundary
+    /// with their following position. A bare token at that boundary must not
+    /// be mistaken for an application head merely because the head descriptor
+    /// itself could resolve it.
+    fn application_operator_follows_head<Root, Record: StructureRecord<Root>>(
+        &self,
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
+        identifier: TriggerIdentifier,
+        structural_stops: &[String],
+    ) -> Result<bool, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
+        let operator = evaluator.operator_text(identifier)?;
+        let mut probe = self.clone();
+        probe.skip_trivia(evaluator)?;
+
+        if let Some(child) = probe.next_child_at_cursor() {
+            probe.position = child.source_bound().end();
+            probe.child_index += 1;
+        } else if let Some(matched) = probe.local_match(evaluator)? {
+            if matched.kind() != TriggerMatchKind::Carrier {
+                return Ok(false);
+            }
+            probe.position = matched.end();
+        } else if probe
+            .take_bare(evaluator, Some(&operator), structural_stops)
+            .is_err()
+        {
+            return Ok(false);
+        }
+
+        Ok(probe.source[probe.position..probe.bound.end()].starts_with(&operator))
+    }
+
     fn text(&self, bound: SourceBound) -> &'source str {
         &self.source[bound.start()..bound.end()]
     }
@@ -853,6 +891,16 @@ where
                 head,
                 payload,
             } => {
+                if !input.application_operator_follows_head(
+                    self,
+                    *operator,
+                    scope.structural_stops,
+                )? {
+                    return Err(DecodeError::BlockKindMismatch {
+                        expected: "application",
+                        found: "source",
+                    });
+                }
                 let operator_text = self.operator_text(*operator)?;
                 let head = self.decode_role(
                     *head,
@@ -877,6 +925,16 @@ where
                 head,
                 payload,
             } => {
+                if !input.application_operator_follows_head(
+                    self,
+                    *operator,
+                    scope.structural_stops,
+                )? {
+                    return Err(DecodeError::BlockKindMismatch {
+                        expected: "application",
+                        found: "source",
+                    });
+                }
                 let operator_text = self.operator_text(*operator)?;
                 let head = self.decode_descriptor(
                     head,

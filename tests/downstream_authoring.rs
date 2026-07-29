@@ -154,6 +154,9 @@ fixture_role!(DelimitedSequenceRootRole, 950);
 fixture_role!(DelimitedSequenceContentRole, 951);
 fixture_role!(DelimitedSequenceKeywordRole, 952);
 fixture_role!(DelimitedSequenceDeclarationRole, 953);
+fixture_role!(ApplicationBoundaryRootRole, 960);
+fixture_role!(ApplicationBoundaryRepeatedRole, 961);
+fixture_role!(ApplicationBoundaryLiteralRole, 962);
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct SixSlotDocumentRecord<Root> {
@@ -431,6 +434,64 @@ impl<Root> StructureRecord<Root> for GenericDelimitedContentRecord<Root> {
 
     fn fields(&self) -> Self::View<'_> {
         GenericDelimitedContentView { record: self }
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+struct ApplicationBoundaryRecord<Root> {
+    root: Position<ApplicationBoundaryRootRole, Root>,
+    repeated: Position<ApplicationBoundaryRepeatedRole, Root>,
+    literal: Position<ApplicationBoundaryLiteralRole, Root>,
+}
+
+impl<Root: Clone> ApplicationBoundaryRecord<Root> {
+    fn new(literal: EncodedId<Root>) -> Self {
+        let sequence = OrderedSequence::try_new::<ApplicationBoundaryRepeatedRole>()
+            .and_then(OrderedSequence::then::<ApplicationBoundaryLiteralRole>)
+            .expect("application repetition and following literal roles are distinct");
+        Self {
+            root: Position::try_new(SharedDescriptor::OrderedSequence(sequence))
+                .expect("application boundary sequence"),
+            repeated: Position::try_new(SharedDescriptor::Repeated {
+                minimum: 0,
+                maximum: None,
+                element: Box::new(SharedDescriptor::InlineApplication {
+                    operator: APPLICATION,
+                    head: Box::new(SharedDescriptor::Reference(AtomDescriptor::any_case())),
+                    payload: Box::new(SharedDescriptor::Reference(AtomDescriptor::any_case())),
+                }),
+            })
+            .expect("repeated application position"),
+            literal: Position::try_new(SharedDescriptor::Literal(literal))
+                .expect("following literal position"),
+        }
+    }
+}
+
+struct ApplicationBoundaryView<'record, Root> {
+    record: &'record ApplicationBoundaryRecord<Root>,
+}
+
+impl<Root> BorrowedFieldView<Root> for ApplicationBoundaryView<'_, Root> {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor) {
+        visitor.field(&self.record.root);
+        visitor.field(&self.record.repeated);
+        visitor.field(&self.record.literal);
+    }
+}
+
+impl<Root> StructureRecord<Root> for ApplicationBoundaryRecord<Root> {
+    type View<'record>
+        = ApplicationBoundaryView<'record, Root>
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.root.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        ApplicationBoundaryView { record: self }
     }
 }
 
@@ -1325,6 +1386,72 @@ fn ordered_product_refuses_a_block_that_does_not_match_its_typed_position() {
             && bound.start() == 0
             && bound.end() == 2
     ));
+}
+
+#[test]
+fn repeated_application_boundary_is_proven_before_name_lookup() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[10, 20]);
+    let private = encoded(FirstFixtureRoot::Universal, &[10, 21]);
+    let record = ApplicationBoundaryRecord::new(private.clone());
+    let constructor = EncodedConstructorId::under(&expected, 1);
+    let application_entry = StructuralEntry::new(
+        expected.clone(),
+        vec![ConstructorCodec::new(
+            constructor,
+            vec![AcceptedDecodeForm::new(
+                DecodeFormId::new(1),
+                record.clone(),
+            )],
+            record,
+        )],
+    );
+    let profile = profile();
+    let application_table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"application operator prelookup boundary"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"repeated applications before a fixed literal"),
+            discovery(),
+            rendering(),
+            vec![application_entry],
+        ),
+        &profile,
+    )
+    .expect("application-boundary table");
+    let evaluator = StructuralEvaluator::new(&application_table).expect("shared evaluator");
+
+    let mut bindings = Bindings::default();
+    bindings.spelling(&private, "Private");
+    let decoded = evaluator
+        .decode_text(&expected, "Private", &bindings)
+        .expect("the following literal terminates the open repetition");
+    assert!(matches!(
+        decoded.field::<ApplicationBoundaryRepeatedRole>(),
+        Some(FieldValue::Repeated(values)) if values.is_empty()
+    ));
+    assert!(matches!(
+        decoded.field::<ApplicationBoundaryLiteralRole>(),
+        Some(FieldValue::Literal(found)) if found == &private
+    ));
+    assert_eq!(
+        bindings.reference_queries.get(),
+        0,
+        "a token without the application cue cannot query the head or payload"
+    );
+    assert_eq!(bindings.declaration_queries.get(), 0);
+
+    let missing = Bindings::default();
+    assert!(matches!(
+        evaluator.decode_text(&expected, "missing.Member Private", &missing),
+        Err(DecodeError::UnresolvedReference { bound })
+            if bound.start() == 0 && bound.end() == 7
+    ));
+    assert_eq!(
+        missing.reference_queries.get(),
+        1,
+        "once the operator is present, the typed lookup-only failure controls"
+    );
+    assert_eq!(missing.declaration_queries.get(), 0);
 }
 
 #[test]
