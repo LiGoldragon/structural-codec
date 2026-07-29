@@ -19,7 +19,7 @@ path = "tests/downstream_authoring.rs"
 
 [dependencies]
 content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "24b43bae5d9748b0e7f679c6ec9f85a643c4d36a" }
-name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "1f558eac44bd03034e51ad98e3a65ec16d8b8411" }
+name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "50cb4bb53ae2dc4f2516f6912be328ef98ae49f8" }
 raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "d979778aa9d79199785f7b683f1029534aea3604" }
 rkyv             = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 thiserror        = "2"
