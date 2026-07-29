@@ -14,8 +14,8 @@ use structural_codec::{
     ApplicationRule, AtomCase, AtomDescriptor, BorrowedFieldView, ConstructorCodec,
     ContextualTextualPolicy, DeclarationAssignment, DecodeError, DecodeFormId, DecodeNameBindings,
     EncodedConstructorId, EncodedNameResolver, EncodedTypeId, FieldEnd, FieldLink, FieldRole,
-    FieldValue, FieldVisitor, NameOccurrence, OrderedProduct, OrderedSequence, Position,
-    ResolvedReference, RuleCoproduct, SharedDescriptor, StableRoleId, StructuralEntry,
+    FieldValue, FieldVisitor, NameOccurrence, OrderedProduct, OrderedSequence, PlannedFieldValue,
+    Position, ResolvedReference, RuleCoproduct, SharedDescriptor, StableRoleId, StructuralEntry,
     StructuralEvaluator, StructuralRule, StructuralValue, StructuralVocabularyIdentity,
     StructureRecord, TableError, TableIdentityPayload, TargetLayoutIdentity,
     TextualRenderingPolicy, UnaryRule,
@@ -1143,9 +1143,35 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
     bindings.declaration(0, 6, "Widget", &declaration);
 
     let evaluator = StructuralEvaluator::new(&table).expect("shared evaluator");
+    let no_fixed_vocabulary = Bindings::<FirstFixtureRoot>::default();
+    assert!(matches!(
+        evaluator.plan_text(&expected, "Realize.target", &no_fixed_vocabulary),
+        Err(DecodeError::UnknownEncodedName { encoded_id }) if encoded_id == keyword
+    ));
+    assert_eq!(no_fixed_vocabulary.declaration_queries.get(), 0);
+    assert_eq!(no_fixed_vocabulary.reference_queries.get(), 0);
+
+    let future_plan = evaluator
+        .plan_text(&expected, "Realize.target", &bindings)
+        .expect("allocation-free dotted future plan");
+    assert!(matches!(
+        future_plan.field::<DerivedFutureRole>(),
+        Some(PlannedFieldValue::Application { head, payload })
+            if matches!(head.as_ref(), PlannedFieldValue::Literal(found) if found == &keyword)
+                && matches!(
+                    payload.as_ref(),
+                    PlannedFieldValue::Reference(found)
+                        if found.spelling().as_str() == "target"
+                            && (found.bound().start(), found.bound().end()) == (8, 14)
+                )
+    ));
+    assert_eq!(bindings.declaration_queries.get(), 0);
+    assert_eq!(bindings.reference_queries.get(), 0);
+
     let future = evaluator
         .decode_text(&expected, "Realize.target", &bindings)
         .expect("dotted future");
+    assert_eq!(future_plan.constructor(), future.constructor());
     assert!(matches!(
         future.field::<DerivedFutureRole>(),
         Some(FieldValue::Application { head, payload })
@@ -1180,6 +1206,27 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
             .encode_text(&expected, &literal, &bindings)
             .expect("literal branch encodes through the same alternation"),
         "Widget"
+    );
+
+    let literal_plan = evaluator
+        .plan_text(&expected, "Widget", &bindings)
+        .expect("allocation-free literal declaration plan");
+    assert!(matches!(
+        literal_plan.field::<DerivedFutureRole>(),
+        Some(PlannedFieldValue::Declaration(found))
+            if found.spelling().as_str() == "Widget"
+                && (found.bound().start(), found.bound().end()) == (0, 6)
+    ));
+    assert_eq!(literal_plan.constructor(), literal.constructor());
+    assert_eq!(
+        bindings.declaration_queries.get(),
+        1,
+        "planning never calls the declaration-assignment boundary"
+    );
+    assert_eq!(
+        bindings.reference_queries.get(),
+        1,
+        "planning never calls the reference-resolution boundary"
     );
 }
 
@@ -1357,6 +1404,40 @@ fn ordered_product_decodes_six_typed_root_blocks_with_absolute_bounds() {
     let assigned = encoded(FirstFixtureRoot::Universal, &[30, 7]);
     let resolved = encoded(FirstFixtureRoot::Universal, &[3]);
     let mut bindings = Bindings::default();
+
+    let plan = evaluator
+        .plan_text(&fixture.document, source, &bindings)
+        .expect("allocation-free six-slot plan");
+    let Some(PlannedFieldValue::Delegated(types)) = plan.field::<TypesRole>() else {
+        panic!("types role retains its delegated structural context");
+    };
+    let Some(PlannedFieldValue::Repeated(items)) = types.field::<DelimitedItemsRole>() else {
+        panic!("types block retains its repeated structural context");
+    };
+    let [PlannedFieldValue::Delegated(item)] = items.as_slice() else {
+        panic!("one selected item retains its constructor and typed roles");
+    };
+    assert!(matches!(
+        item.field::<ApplicationHead>(),
+        Some(PlannedFieldValue::Declaration(found))
+            if found.spelling().as_str() == "Widget"
+                && (found.bound().start(), found.bound().end()) == (15, 21)
+    ));
+    assert!(matches!(
+        item.field::<ApplicationPayload>(),
+        Some(PlannedFieldValue::Reference(found))
+            if found.spelling().as_str() == "Integer"
+                && (found.bound().start(), found.bound().end()) == (22, 29)
+    ));
+    assert_eq!(bindings.declaration_queries.get(), 0);
+    assert_eq!(bindings.reference_queries.get(), 0);
+    assert!(
+        evaluator
+            .plan_text(&fixture.document, "{} [] [] {Widget.} {} {}", &bindings,)
+            .is_err(),
+        "malformed source yields no partial plan"
+    );
+
     bindings.declaration(15, 21, "Widget", &assigned);
     bindings.reference(22, 29, "Integer", &resolved);
 
@@ -1407,6 +1488,7 @@ fn ordered_product_decodes_six_typed_root_blocks_with_absolute_bounds() {
     );
     assert_eq!(bindings.declaration_queries.get(), 1);
     assert_eq!(bindings.reference_queries.get(), 1);
+    assert_eq!(plan.constructor(), decoded.value().constructor());
     assert_eq!(
         evaluator
             .encode_text(&fixture.document, decoded.value(), &bindings)
@@ -1568,9 +1650,40 @@ fn ordered_sequence_chooses_the_greatest_repetition_count_with_a_typed_tail() {
     bindings.spelling(&private, "Private");
     bindings.reference(8, 13, "first", &first);
     bindings.reference(22, 28, "second", &second);
+    let plan = evaluator
+        .plan_text(&expected, source, &bindings)
+        .expect("allocation-free plan follows the viable typed tail");
+    assert!(matches!(
+        plan.field::<AmbiguousSequenceRepeatedRole>(),
+        Some(PlannedFieldValue::Repeated(values))
+            if matches!(
+                values.as_slice(),
+                [PlannedFieldValue::Application { payload, .. }]
+                    if matches!(
+                        payload.as_ref(),
+                        PlannedFieldValue::Reference(found)
+                            if found.spelling().as_str() == "first"
+                    )
+            )
+    ));
+    assert!(matches!(
+        plan.field::<AmbiguousSequenceRequiredRole>(),
+        Some(PlannedFieldValue::Application { payload, .. })
+            if matches!(
+                payload.as_ref(),
+                PlannedFieldValue::Reference(found)
+                    if found.spelling().as_str() == "second"
+            )
+    ));
+    assert_eq!(
+        bindings.reference_queries.get(),
+        0,
+        "planning retains only the selected branch and performs no lookup callback"
+    );
     let decoded = evaluator
         .decode_text(&expected, source, &bindings)
         .expect("the greatest viable repetition count is one");
+    assert_eq!(plan.constructor(), decoded.constructor());
     assert!(matches!(
         decoded.field::<AmbiguousSequenceRepeatedRole>(),
         Some(FieldValue::Repeated(values)) if values.len() == 1

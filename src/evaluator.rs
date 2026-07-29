@@ -20,6 +20,7 @@ use crate::names::{
     DeclarationAssignment, DecodeNameBindings, EncodedNameResolver, NameOccurrence,
     ResolvedReference,
 };
+use crate::plan::{PlannedFieldValue, PlannedName, PlannedStructuralValue};
 use crate::table::AddressedStructuralTable;
 use crate::value::{
     FieldValue, RoleKeyedMirror, ScalarValue, SourceBoundedStructuralValue, StructuralValue,
@@ -71,12 +72,29 @@ impl<Root: Clone> DraftStructuralValue<Root> {
         let field_bounds = self.field_bounds.clone();
         SourceBoundedStructuralValue::new(self.materialize_value(), field_bounds)
     }
+
+    fn materialize_plan(self) -> PlannedStructuralValue<Root> {
+        PlannedStructuralValue::new(
+            self.constructor,
+            self.fields
+                .into_iter()
+                .map(|(role, value)| (role, value.materialize_plan()))
+                .collect(),
+            self.field_bounds,
+        )
+    }
+}
+
+#[derive(Clone)]
+enum DraftName<Root> {
+    Bound(name_table::EncodedId<Root>),
+    Planned(PlannedName),
 }
 
 #[derive(Clone)]
 enum DraftFieldValue<Root> {
-    Declaration(DeclarationAssignment<Root>),
-    Reference(ResolvedReference<Root>),
+    Declaration(DraftName<Root>),
+    Reference(DraftName<Root>),
     Literal(name_table::EncodedId<Root>),
     Scalar(ScalarValue),
     OrderedProduct,
@@ -93,8 +111,15 @@ enum DraftFieldValue<Root> {
 impl<Root: Clone> DraftFieldValue<Root> {
     fn materialize(self) -> FieldValue<Root> {
         match self {
-            Self::Declaration(assignment) => FieldValue::Declaration(assignment),
-            Self::Reference(reference) => FieldValue::Reference(reference),
+            Self::Declaration(DraftName::Bound(encoded_id)) => {
+                FieldValue::Declaration(DeclarationAssignment::new(encoded_id))
+            }
+            Self::Reference(DraftName::Bound(encoded_id)) => {
+                FieldValue::Reference(ResolvedReference::new(encoded_id))
+            }
+            Self::Declaration(DraftName::Planned(_)) | Self::Reference(DraftName::Planned(_)) => {
+                unreachable!("bound decoding cannot contain planned names")
+            }
             Self::Literal(identifier) => FieldValue::Literal(identifier),
             Self::Scalar(value) => FieldValue::Scalar(value),
             Self::OrderedProduct => FieldValue::OrderedProduct,
@@ -118,6 +143,130 @@ impl<Root: Clone> DraftFieldValue<Root> {
                     .collect(),
             ),
         }
+    }
+
+    fn materialize_plan(self) -> PlannedFieldValue<Root> {
+        match self {
+            Self::Declaration(DraftName::Planned(name)) => PlannedFieldValue::Declaration(name),
+            Self::Reference(DraftName::Planned(name)) => PlannedFieldValue::Reference(name),
+            Self::Declaration(DraftName::Bound(_)) | Self::Reference(DraftName::Bound(_)) => {
+                unreachable!("allocation-free planning cannot contain bound names")
+            }
+            Self::Literal(identifier) => PlannedFieldValue::Literal(identifier),
+            Self::Scalar(value) => PlannedFieldValue::Scalar(value),
+            Self::OrderedProduct => PlannedFieldValue::OrderedProduct,
+            Self::Delimited(value) => {
+                PlannedFieldValue::Delimited(Box::new(value.as_ref().clone().materialize_plan()))
+            }
+            Self::Carrier(value) => {
+                PlannedFieldValue::Carrier(Box::new(value.as_ref().clone().materialize_plan()))
+            }
+            Self::Application { head, payload } => PlannedFieldValue::Application {
+                head: Box::new(head.as_ref().clone().materialize_plan()),
+                payload: Box::new(payload.as_ref().clone().materialize_plan()),
+            },
+            Self::Delegated(value) => {
+                PlannedFieldValue::Delegated(Box::new(value.as_ref().clone().materialize_plan()))
+            }
+            Self::Repeated(values) => PlannedFieldValue::Repeated(
+                values
+                    .into_iter()
+                    .map(DraftFieldValue::materialize_plan)
+                    .collect(),
+            ),
+        }
+    }
+}
+
+trait EvaluationNames<Root>: EncodedNameResolver<Root> {
+    fn declaration(
+        &self,
+        occurrence: NameOccurrence<'_>,
+    ) -> Result<DraftName<Root>, DecodeError<Root>>;
+
+    fn reference(
+        &self,
+        occurrence: NameOccurrence<'_>,
+    ) -> Result<DraftName<Root>, DecodeError<Root>>;
+}
+
+struct BoundEvaluationNames<'bindings, Bindings: ?Sized> {
+    bindings: &'bindings Bindings,
+}
+
+impl<Root, Bindings> EncodedNameResolver<Root> for BoundEvaluationNames<'_, Bindings>
+where
+    Bindings: DecodeNameBindings<Root> + ?Sized,
+{
+    fn resolve(&self, encoded_id: &name_table::EncodedId<Root>) -> Option<&name_table::Name> {
+        self.bindings.resolve(encoded_id)
+    }
+}
+
+impl<Root, Bindings> EvaluationNames<Root> for BoundEvaluationNames<'_, Bindings>
+where
+    Bindings: DecodeNameBindings<Root> + ?Sized,
+{
+    fn declaration(
+        &self,
+        occurrence: NameOccurrence<'_>,
+    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+        let bound = occurrence.bound();
+        self.bindings
+            .declaration_assignment(occurrence)
+            .map(DeclarationAssignment::into_encoded_id)
+            .map(DraftName::Bound)
+            .ok_or(DecodeError::MissingDeclarationAssignment { bound })
+    }
+
+    fn reference(
+        &self,
+        occurrence: NameOccurrence<'_>,
+    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+        let bound = occurrence.bound();
+        self.bindings
+            .reference_resolution(occurrence)
+            .map(ResolvedReference::into_encoded_id)
+            .map(DraftName::Bound)
+            .ok_or(DecodeError::UnresolvedReference { bound })
+    }
+}
+
+struct PlanningEvaluationNames<'resolver, Resolver: ?Sized> {
+    resolver: &'resolver Resolver,
+}
+
+impl<Root, Resolver> EncodedNameResolver<Root> for PlanningEvaluationNames<'_, Resolver>
+where
+    Resolver: EncodedNameResolver<Root> + ?Sized,
+{
+    fn resolve(&self, encoded_id: &name_table::EncodedId<Root>) -> Option<&name_table::Name> {
+        self.resolver.resolve(encoded_id)
+    }
+}
+
+impl<Root, Resolver> EvaluationNames<Root> for PlanningEvaluationNames<'_, Resolver>
+where
+    Resolver: EncodedNameResolver<Root> + ?Sized,
+{
+    fn declaration(
+        &self,
+        occurrence: NameOccurrence<'_>,
+    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+        Ok(DraftName::Planned(PlannedName::new(
+            occurrence.spelling(),
+            occurrence.bound(),
+        )))
+    }
+
+    fn reference(
+        &self,
+        occurrence: NameOccurrence<'_>,
+    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+        Ok(DraftName::Planned(PlannedName::new(
+            occurrence.spelling(),
+            occurrence.bound(),
+        )))
     }
 }
 
@@ -557,7 +706,8 @@ where
         source: &str,
         bindings: &Bindings,
     ) -> Result<StructuralValue<Root>, DecodeError<Root>> {
-        self.decode_text_to_draft(expected, source, bindings)
+        let names = BoundEvaluationNames { bindings };
+        self.decode_text_to_draft(expected, source, &names)
             .map(DraftStructuralValue::materialize_value)
     }
 
@@ -569,15 +719,33 @@ where
         source: &str,
         bindings: &Bindings,
     ) -> Result<SourceBoundedStructuralValue<Root>, DecodeError<Root>> {
-        self.decode_text_to_draft(expected, source, bindings)
+        let names = BoundEvaluationNames { bindings };
+        self.decode_text_to_draft(expected, source, &names)
             .map(DraftStructuralValue::materialize_bounded)
     }
 
-    fn decode_text_to_draft<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    /// Select and validate one complete structural branch without allocating
+    /// or accepting identities for declaration and reference occurrences.
+    ///
+    /// Fixed literal and exclusion vocabulary still resolve through immutable
+    /// encoded identity. The returned role-keyed tree retains exact source
+    /// spellings and bounds only at this TextualForm boundary.
+    pub fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         source: &str,
-        bindings: &Bindings,
+        resolver: &Resolver,
+    ) -> Result<PlannedStructuralValue<Root>, DecodeError<Root>> {
+        let names = PlanningEvaluationNames { resolver };
+        self.decode_text_to_draft(expected, source, &names)
+            .map(DraftStructuralValue::materialize_plan)
+    }
+
+    fn decode_text_to_draft<Names: EvaluationNames<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        source: &str,
+        names: &Names,
     ) -> Result<DraftStructuralValue<Root>, DecodeError<Root>> {
         let tree =
             DiscoveredBlockTree::discover(source, self.profile, self.table.block_discovery())?;
@@ -587,24 +755,19 @@ where
         if cursor.position == cursor.bound.end() {
             return Err(DecodeError::RootObjectCount);
         }
-        let value = self.decode_type(
-            expected,
-            &mut cursor,
-            bindings,
-            &[],
-            DecodeContinuation::Bound,
-        )?;
+        let value =
+            self.decode_type(expected, &mut cursor, names, &[], DecodeContinuation::Bound)?;
         if !cursor.finish(self)? {
             return Err(DecodeError::RootObjectCount);
         }
         Ok(value)
     }
 
-    fn decode_type<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_type<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         input: &mut BoundedCursor<'_, '_>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
         continuation: DecodeContinuation<'_>,
     ) -> Result<DraftStructuralValue<Root>, DecodeError<Root>> {
@@ -634,14 +797,8 @@ where
                 let mut candidate = input.clone();
                 let mut state = Self::state_for(accepted.rule());
                 let root = accepted.rule().root_role();
-                match self.decode_role(
-                    root,
-                    &mut candidate,
-                    &mut state,
-                    bindings,
-                    &next_active,
-                    scope,
-                ) {
+                match self.decode_role(root, &mut candidate, &mut state, names, &next_active, scope)
+                {
                     Ok(_) if candidate.completes(self, continuation, scope.structural_stops)? => {
                         *input = candidate;
                         return Ok(DraftStructuralValue {
@@ -722,31 +879,31 @@ where
         }
     }
 
-    fn decode_role<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_role<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         role: StableRoleId,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
     ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
         input.skip_trivia(self)?;
         let start = input.position;
         let descriptor = state.descriptor(role)?.clone();
-        let value = self.decode_descriptor(&descriptor, input, state, bindings, active, scope)?;
+        let value = self.decode_descriptor(&descriptor, input, state, names, active, scope)?;
         let bound = SourceBound::checked(input.source, start, input.position)?;
         state.fields.insert(role, value.clone());
         state.field_bounds.insert(role, bound);
         Ok(value)
     }
 
-    fn decode_descriptor<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_descriptor<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         descriptor: &SharedDescriptor<Root>,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
     ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
@@ -760,10 +917,8 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                let assignment = bindings
-                    .declaration_assignment(NameOccurrence::new(atom.text(), bound))
-                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
-                self.verify_bound_spelling(bindings, assignment.encoded_id(), atom.text(), bound)?;
+                let assignment = names.declaration(NameOccurrence::new(atom.text(), bound))?;
+                self.verify_draft_spelling(names, &assignment, atom.text(), bound)?;
                 Ok(DraftFieldValue::Declaration(assignment))
             }
             SharedDescriptor::DeclarationExcluding {
@@ -779,17 +934,16 @@ where
                     return Err(DecodeError::CaseMismatch);
                 }
                 if excluded.iter().any(|encoded_id| {
-                    bindings
+                    names
                         .resolve(encoded_id)
                         .is_some_and(|name| name.as_str() == atom.text())
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
-                let assignment = bindings
-                    .declaration_assignment(NameOccurrence::new(atom.text(), bound))
-                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
-                self.verify_bound_spelling(bindings, assignment.encoded_id(), atom.text(), bound)?;
-                if excluded.contains(assignment.encoded_id()) {
+                let assignment = names.declaration(NameOccurrence::new(atom.text(), bound))?;
+                self.verify_draft_spelling(names, &assignment, atom.text(), bound)?;
+                if matches!(&assignment, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 Ok(DraftFieldValue::Declaration(assignment))
@@ -803,10 +957,8 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                let reference = bindings
-                    .reference_resolution(NameOccurrence::new(atom.text(), bound))
-                    .ok_or(DecodeError::UnresolvedReference { bound })?;
-                self.verify_bound_spelling(bindings, reference.encoded_id(), atom.text(), bound)?;
+                let reference = names.reference(NameOccurrence::new(atom.text(), bound))?;
+                self.verify_draft_spelling(names, &reference, atom.text(), bound)?;
                 Ok(DraftFieldValue::Reference(reference))
             }
             SharedDescriptor::ReferenceExcluding {
@@ -822,17 +974,16 @@ where
                     return Err(DecodeError::CaseMismatch);
                 }
                 if excluded.iter().any(|encoded_id| {
-                    bindings
+                    names
                         .resolve(encoded_id)
                         .is_some_and(|name| name.as_str() == atom.text())
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
-                let reference = bindings
-                    .reference_resolution(NameOccurrence::new(atom.text(), bound))
-                    .ok_or(DecodeError::UnresolvedReference { bound })?;
-                self.verify_bound_spelling(bindings, reference.encoded_id(), atom.text(), bound)?;
-                if excluded.contains(reference.encoded_id()) {
+                let reference = names.reference(NameOccurrence::new(atom.text(), bound))?;
+                self.verify_draft_spelling(names, &reference, atom.text(), bound)?;
+                if matches!(&reference, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 Ok(DraftFieldValue::Reference(reference))
@@ -843,11 +994,12 @@ where
                     scope.continuation.terminator(),
                     scope.structural_stops,
                 )?;
-                let spelling = bindings.resolve(identifier).ok_or_else(|| {
-                    DecodeError::UnknownEncodedName {
-                        encoded_id: identifier.clone(),
-                    }
-                })?;
+                let spelling =
+                    names
+                        .resolve(identifier)
+                        .ok_or_else(|| DecodeError::UnknownEncodedName {
+                            encoded_id: identifier.clone(),
+                        })?;
                 if spelling.as_str() != atom.text() {
                     return Err(DecodeError::LiteralMismatch);
                 }
@@ -878,17 +1030,17 @@ where
                 Ok(DraftFieldValue::Delegated(Rc::new(self.decode_type(
                     target,
                     input,
-                    bindings,
+                    names,
                     active,
                     scope.continuation,
                 )?)))
             }
             SharedDescriptor::OrderedProduct(product) => {
-                self.decode_ordered_product(product, input, state, bindings, active)?;
+                self.decode_ordered_product(product, input, state, names, active)?;
                 Ok(DraftFieldValue::OrderedProduct)
             }
             SharedDescriptor::OrderedSequence(sequence) => {
-                self.decode_ordered_sequence(sequence, input, state, bindings, active, scope)?;
+                self.decode_ordered_sequence(sequence, input, state, names, active, scope)?;
                 Ok(DraftFieldValue::OrderedProduct)
             }
             SharedDescriptor::Application {
@@ -911,7 +1063,7 @@ where
                     *head,
                     input,
                     state,
-                    bindings,
+                    names,
                     active,
                     DecodeScope {
                         continuation: DecodeContinuation::Before(&operator_text),
@@ -919,7 +1071,7 @@ where
                     },
                 )?;
                 input.consume_operator(self, *operator)?;
-                let payload = self.decode_role(*payload, input, state, bindings, active, scope)?;
+                let payload = self.decode_role(*payload, input, state, names, active, scope)?;
                 Ok(DraftFieldValue::Application {
                     head: Rc::new(head),
                     payload: Rc::new(payload),
@@ -945,7 +1097,7 @@ where
                     head,
                     input,
                     state,
-                    bindings,
+                    names,
                     active,
                     DecodeScope {
                         continuation: DecodeContinuation::Before(&operator_text),
@@ -954,7 +1106,7 @@ where
                 )?;
                 input.consume_operator(self, *operator)?;
                 let payload =
-                    self.decode_descriptor(payload, input, state, bindings, active, scope)?;
+                    self.decode_descriptor(payload, input, state, names, active, scope)?;
                 Ok(DraftFieldValue::Application {
                     head: Rc::new(head),
                     payload: Rc::new(payload),
@@ -968,7 +1120,7 @@ where
                         alternative,
                         &mut candidate,
                         &mut candidate_state,
-                        bindings,
+                        names,
                         active,
                         scope,
                     ) {
@@ -990,13 +1142,13 @@ where
                     state.descriptor(*content)?,
                     SharedDescriptor::Repeated { .. }
                 ) {
-                    self.decode_repeated_role(*content, &mut interior, state, bindings, active)?
+                    self.decode_repeated_role(*content, &mut interior, state, names, active)?
                 } else {
                     self.decode_role(
                         *content,
                         &mut interior,
                         state,
-                        bindings,
+                        names,
                         active,
                         DecodeScope {
                             continuation: DecodeContinuation::Bound,
@@ -1026,7 +1178,7 @@ where
                     });
                 }
                 Ok(DraftFieldValue::Carrier(Rc::new(
-                    self.decode_carrier_content(content, &body, bound, bindings)?,
+                    self.decode_carrier_content(content, &body, bound, names)?,
                 )))
             }
             SharedDescriptor::Repeated { .. } => Err(DecodeError::BlockKindMismatch {
@@ -1036,12 +1188,12 @@ where
         }
     }
 
-    fn decode_ordered_product<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_ordered_product<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         product: &crate::form::OrderedProduct,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
     ) -> Result<(), DecodeError<Root>> {
         input.skip_trivia(self)?;
@@ -1069,7 +1221,7 @@ where
                 role,
                 input,
                 state,
-                bindings,
+                names,
                 active,
                 DecodeScope {
                     continuation: DecodeContinuation::Repeated,
@@ -1104,26 +1256,26 @@ where
         Ok(())
     }
 
-    fn decode_ordered_sequence<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_ordered_sequence<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         sequence: &crate::form::OrderedSequence,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
     ) -> Result<(), DecodeError<Root>> {
-        self.decode_ordered_sequence_from(sequence, 0, input, state, bindings, active, scope)
+        self.decode_ordered_sequence_from(sequence, 0, input, state, names, active, scope)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn decode_ordered_sequence_from<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_ordered_sequence_from<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         sequence: &crate::form::OrderedSequence,
         position: usize,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
     ) -> Result<(), DecodeError<Root>> {
@@ -1139,8 +1291,8 @@ where
         } = descriptor
         {
             return self.decode_sequence_repetition_with_tail(
-                sequence, position, role, minimum, maximum, &element, input, state, bindings,
-                active, scope,
+                sequence, position, role, minimum, maximum, &element, input, state, names, active,
+                scope,
             );
         }
 
@@ -1154,7 +1306,7 @@ where
             role,
             input,
             state,
-            bindings,
+            names,
             active,
             DecodeScope {
                 continuation,
@@ -1173,14 +1325,14 @@ where
             position + 1,
             input,
             state,
-            bindings,
+            names,
             active,
             scope,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn decode_sequence_repetition_with_tail<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_sequence_repetition_with_tail<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         sequence: &crate::form::OrderedSequence,
         position: usize,
@@ -1190,7 +1342,7 @@ where
         element: &SharedDescriptor<Root>,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
     ) -> Result<(), DecodeError<Root>> {
@@ -1214,7 +1366,7 @@ where
                 element,
                 &mut candidate,
                 &mut candidate_state,
-                bindings,
+                names,
                 active,
                 DecodeScope {
                     continuation: DecodeContinuation::Repeated,
@@ -1249,7 +1401,7 @@ where
                 position + 1,
                 &mut candidate_input,
                 &mut candidate_state,
-                bindings,
+                names,
                 active,
                 scope,
             ) {
@@ -1287,12 +1439,12 @@ where
         })
     }
 
-    fn decode_repeated_role<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_repeated_role<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         role: StableRoleId,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
-        bindings: &Bindings,
+        names: &Names,
         active: &[DecodeProgressKey<Root>],
     ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
         let descriptor = state.descriptor(role)?.clone();
@@ -1317,7 +1469,7 @@ where
                 &element,
                 input,
                 state,
-                bindings,
+                names,
                 active,
                 DecodeScope {
                     continuation: DecodeContinuation::Repeated,
@@ -1356,13 +1508,16 @@ where
         Ok((Atom::new(text), bound))
     }
 
-    fn verify_bound_spelling(
+    fn verify_draft_spelling(
         &self,
         resolver: &(impl EncodedNameResolver<Root> + ?Sized),
-        encoded_id: &name_table::EncodedId<Root>,
+        name: &DraftName<Root>,
         source_spelling: &str,
         bound: SourceBound,
     ) -> Result<(), DecodeError<Root>> {
+        let DraftName::Bound(encoded_id) = name else {
+            return Ok(());
+        };
         let resolved =
             resolver
                 .resolve(encoded_id)
@@ -1426,18 +1581,18 @@ where
         }
     }
 
-    fn decode_carrier_content<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    fn decode_carrier_content<Names: EvaluationNames<Root> + ?Sized>(
         &self,
         descriptor: &SharedDescriptor<Root>,
         body: &str,
         bound: SourceBound,
-        bindings: &Bindings,
+        names: &Names,
     ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
         let atom = Atom::new(body);
         match descriptor {
             SharedDescriptor::Alternation(alternatives) => {
                 for alternative in alternatives {
-                    match self.decode_carrier_content(alternative, body, bound, bindings) {
+                    match self.decode_carrier_content(alternative, body, bound, names) {
                         Ok(value) => return Ok(value),
                         Err(error) if error.is_structural_non_match() => {}
                         Err(error) => return Err(error),
@@ -1449,10 +1604,8 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                let assignment = bindings
-                    .declaration_assignment(NameOccurrence::new(body, bound))
-                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
-                self.verify_bound_spelling(bindings, assignment.encoded_id(), body, bound)?;
+                let assignment = names.declaration(NameOccurrence::new(body, bound))?;
+                self.verify_draft_spelling(names, &assignment, body, bound)?;
                 Ok(DraftFieldValue::Declaration(assignment))
             }
             SharedDescriptor::DeclarationExcluding {
@@ -1463,17 +1616,16 @@ where
                     return Err(DecodeError::CaseMismatch);
                 }
                 if excluded.iter().any(|encoded_id| {
-                    bindings
+                    names
                         .resolve(encoded_id)
                         .is_some_and(|name| name.as_str() == body)
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
-                let assignment = bindings
-                    .declaration_assignment(NameOccurrence::new(body, bound))
-                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
-                self.verify_bound_spelling(bindings, assignment.encoded_id(), body, bound)?;
-                if excluded.contains(assignment.encoded_id()) {
+                let assignment = names.declaration(NameOccurrence::new(body, bound))?;
+                self.verify_draft_spelling(names, &assignment, body, bound)?;
+                if matches!(&assignment, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 Ok(DraftFieldValue::Declaration(assignment))
@@ -1482,10 +1634,8 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                let reference = bindings
-                    .reference_resolution(NameOccurrence::new(body, bound))
-                    .ok_or(DecodeError::UnresolvedReference { bound })?;
-                self.verify_bound_spelling(bindings, reference.encoded_id(), body, bound)?;
+                let reference = names.reference(NameOccurrence::new(body, bound))?;
+                self.verify_draft_spelling(names, &reference, body, bound)?;
                 Ok(DraftFieldValue::Reference(reference))
             }
             SharedDescriptor::ReferenceExcluding {
@@ -1496,27 +1646,27 @@ where
                     return Err(DecodeError::CaseMismatch);
                 }
                 if excluded.iter().any(|encoded_id| {
-                    bindings
+                    names
                         .resolve(encoded_id)
                         .is_some_and(|name| name.as_str() == body)
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
-                let reference = bindings
-                    .reference_resolution(NameOccurrence::new(body, bound))
-                    .ok_or(DecodeError::UnresolvedReference { bound })?;
-                self.verify_bound_spelling(bindings, reference.encoded_id(), body, bound)?;
-                if excluded.contains(reference.encoded_id()) {
+                let reference = names.reference(NameOccurrence::new(body, bound))?;
+                self.verify_draft_spelling(names, &reference, body, bound)?;
+                if matches!(&reference, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 Ok(DraftFieldValue::Reference(reference))
             }
             SharedDescriptor::Literal(identifier) => {
-                let spelling = bindings.resolve(identifier).ok_or_else(|| {
-                    DecodeError::UnknownEncodedName {
-                        encoded_id: identifier.clone(),
-                    }
-                })?;
+                let spelling =
+                    names
+                        .resolve(identifier)
+                        .ok_or_else(|| DecodeError::UnknownEncodedName {
+                            encoded_id: identifier.clone(),
+                        })?;
                 if spelling.as_str() != body {
                     return Err(DecodeError::LiteralMismatch);
                 }

@@ -46,6 +46,7 @@ pub mod form;
 pub mod ids;
 pub mod landing;
 pub mod names;
+pub mod plan;
 pub mod table;
 pub mod textual_form;
 pub mod value;
@@ -77,6 +78,7 @@ pub use names::{
     DeclarationAssignment, DecodeNameBindings, EncodedNameResolver, NameOccurrence,
     ResolvedReference,
 };
+pub use plan::{PlannedFieldValue, PlannedName, PlannedStructuralValue};
 pub use raw_discovery::AtomCase;
 pub use table::{
     AddressedStructuralTable, ArchivedTablePayload, ContextualTextualPolicy,
