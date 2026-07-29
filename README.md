@@ -1,40 +1,30 @@
 # structural-codec
 
-`structural-codec` is the shared evaluator for archived structural rule records.
-Each fixed rule is a real typed Rust struct whose fields are distinct
-`Position<Role, Descriptor>` values. The archived position carries its stable role id, while
-the evaluator receives only an ephemeral heterogeneous borrowed view for shared
-traversal.
+`structural-codec` is the shared evaluator for archived, fully typed structural
+rule records.
 
-The table stores a language dimension, a typed target-layout content identity,
-the exact `ContentHash<TokenProfileDomain>`, canonical block-discovery rules,
-an explicit per-context textual rendering policy, and a vocabulary identity.
-Sealing binds the rules and policy to the exact profile and the table owns the
-runtime values. Textual decode discovers source-bounded blocks before one
-expectation-driven bounded-cursor traversal; Textual encode follows the same
-descriptor/context path and writes only explicit policy-selected profile
-spellings. Fixture vocabularies use a separate
-identity domain and reserved Schema ids, so they cannot compose with production
-Schema sidecars.
+The crate is generic over a caller-supplied vocabulary-root enum. Type,
+constructor, descriptor, and mirror values retain complete root-fronted
+encoded-ID chains without flattening. Declarations accept translator-issued
+assignments, references use lookup-only resolution, and fixed vocabulary words
+resolve through a read-only spelling projection. The crate has no identity
+allocation surface.
 
-There is one evaluator and one conservative disjointness prover.
-`ConstructorCodec<R>` and `AddressedStructuralTable<R>` accept any archived
-`StructureRecord`; `StructuralRule` is only the built-in convenience vocabulary.
-`RuleCoproduct<L, R>` combines downstream record shapes while exposing data
-only, so no language-specific grammar interpreter is required. Runtime vectors
-are limited to accepted alternatives and explicit repetition; stable
-constructor/form identities, never vector position, identify alternatives.
+Textual decode first discovers source-bounded blocks, then evaluates expected
+typed positions through one bounded-cursor engine. Tokens use lexical
+longest-match. Alternative forms must be provably disjoint over typed
+positions; ambiguous shapes fail when the table seals instead of being
+order-resolved.
 
-`StructuralValue` is a constructor-tagged role-keyed mirror. Language
-`Textual::reify` and `Textual::reflect` remain manual mappings between this
-mirror and encoded values; derivation remains deliberately open.
+`StructuralRule` is a convenience vocabulary. Downstream repositories may
+archive their own real `StructureRecord` types and still use the same
+evaluator, prover, and rendering path.
 
-Downstream vocabularies author opaque language-scoped ids through checked
-constructors, define their own `FieldRole` markers, and seal a complete typed
-table before evaluation. The seal rejects duplicate constructor and decode-form
-identities as well as cross-language associations. Manual `Textual::reflect`
-uses `StructuralValue::record` to insert values by typed role, and `reify`
-retrieves them the same way; neither path writes raw role ids or map entries.
+Fixed multi-block documents use `OrderedProduct`: an ordered set of links to
+real typed record fields, each delegating to its own expected type.
+`decode_text_bounded` returns the value plus exact full-source bounds keyed by
+those field roles. Arity and position mismatches fail typed; no indexed root
+splitter is exposed.
 
 ## Build and test
 

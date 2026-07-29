@@ -4,22 +4,22 @@
 use raw_discovery::TriggerIdentifier;
 
 use crate::error::AuthoringError;
-use crate::form::{ApplicationDelimitedRule, AtomDescriptor, SharedDescriptor, StructuralRule};
+use crate::form::{ApplicationDelimitedRule, SharedDescriptor, StructuralRule};
 
-pub struct ApplicationDelimitedAuthoring {
+pub struct ApplicationDelimitedAuthoring<Root> {
     pub operator: TriggerIdentifier,
     pub boundary: TriggerIdentifier,
-    pub head: AtomDescriptor,
-    pub element: SharedDescriptor,
+    pub head: SharedDescriptor<Root>,
+    pub element: SharedDescriptor<Root>,
 }
 
-impl ApplicationDelimitedAuthoring {
-    pub fn normalize(self) -> Result<StructuralRule, AuthoringError> {
+impl<Root> ApplicationDelimitedAuthoring<Root> {
+    pub fn normalize(self) -> Result<StructuralRule<Root>, AuthoringError> {
         Ok(StructuralRule::ApplicationDelimited(
             ApplicationDelimitedRule::new(
                 self.operator,
                 self.boundary,
-                SharedDescriptor::Atom(self.head),
+                self.head,
                 self.element,
                 1,
                 Some(1),

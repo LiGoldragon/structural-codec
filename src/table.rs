@@ -1,68 +1,9 @@
 //! Sealed, vocabulary-identified tables of archived typed rule records.
 //!
-//! A downstream vocabulary can construct its typed records without access to
-//! raw identity fields, combine several record shapes with
-//! [`RuleCoproduct`](crate::form::RuleCoproduct),
-//! then seal the whole table as the validation boundary. The shared evaluator
-//! and prover operate on its `StructureRecord` field data; the record type does
-//! not implement grammar behavior:
-//!
-//! ```
-//! use std::collections::BTreeMap;
-//!
-//! use raw_discovery::{
-//!     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration,
-//!     BoundaryDiscoveryContext, BoundaryDiscoveryContextIdentifier, RawProfile, TriggerSet,
-//! };
-//! use structural_codec::{
-//!     AcceptedDecodeForm, AddressedStructuralTable, ConstructorCodec, DecodeFormId,
-//!     EncodedConstructorId, EncodedLanguage, LeafCodec, ScopedEncodedTypeId,
-//!     SharedDescriptor, StructuralEntry, StructuralRule, StructuralVocabularyIdentity,
-//!     ContextualTextualPolicy, TableIdentityPayload, TargetLayoutIdentity,
-//!     TextualRenderingPolicy, UnaryRule,
-//! };
-//!
-//! let profile = RawProfile::standard().seal()?;
-//! let type_id = ScopedEncodedTypeId::schema(7);
-//! let rule = StructuralRule::Unary(
-//!     UnaryRule::new(SharedDescriptor::Leaf(LeafCodec::Integer)).expect("built-in role"),
-//! );
-//! let constructor = EncodedConstructorId::under(type_id, 1);
-//! let entry = StructuralEntry::new(
-//!     type_id,
-//!     vec![ConstructorCodec::new(
-//!         constructor,
-//!         vec![AcceptedDecodeForm::new(DecodeFormId::new(1), rule.clone())],
-//!         rule,
-//!     )],
-//! );
-//! let payload = TableIdentityPayload::new(
-//!     EncodedLanguage::Schema,
-//!     TargetLayoutIdentity::derive(b"downstream encoded layout"),
-//!     profile.identity(),
-//!     StructuralVocabularyIdentity::language(b"downstream vocabulary"),
-//!     BlockTreeDiscoveryConfiguration::new(
-//!         BoundaryDiscoveryConfiguration::new(
-//!             BoundaryDiscoveryContextIdentifier::new(1),
-//!             vec![BoundaryDiscoveryContext::new(
-//!                 BoundaryDiscoveryContextIdentifier::new(1),
-//!                 TriggerSet::new(vec![]),
-//!             )],
-//!             vec![],
-//!         ),
-//!         vec![],
-//!     ),
-//!     TextualRenderingPolicy::new(vec![ContextualTextualPolicy::new(
-//!         BoundaryDiscoveryContextIdentifier::new(1),
-//!         None,
-//!         None,
-//!     )]),
-//!     BTreeMap::from([(type_id, entry)]),
-//! );
-//! let table = AddressedStructuralTable::seal(payload, &profile)?;
-//! assert!(table.entry(type_id).is_some());
-//! # Ok::<(), structural_codec::TableError>(())
-//! ```
+//! A downstream vocabulary supplies its root enum and complete encoded-ID
+//! chains, authors real typed records, and seals those records as one table.
+//! The shared evaluator and prover operate only on `StructureRecord` field
+//! data; records carry no language-specific grammar algorithm.
 
 use std::collections::BTreeMap;
 
@@ -78,7 +19,7 @@ use crate::error::TableError;
 use crate::form::{
     BorrowedFieldView, FieldVisitor, SharedDescriptor, StructuralRule, StructureRecord,
 };
-use crate::ids::{EncodedLanguage, ScopedEncodedTypeId, StableRoleId};
+use crate::ids::{EncodedTypeId, StableRoleId};
 
 /// The target encoded-layout identity is a domain-typed content address. There
 /// is no raw byte wrapper, default value, or zero placeholder.
@@ -114,8 +55,7 @@ impl HashDomain for StructuralVocabularyDomain {
     }
 }
 
-/// A separate domain makes test-only sidecars unable to masquerade as a
-/// production vocabulary even when their language dimension is Schema.
+/// A separate optional domain for explicitly test-only sidecars.
 pub struct FixtureVocabularyDomain;
 impl HashDomain for FixtureVocabularyDomain {
     fn separation() -> DomainSeparation {
@@ -203,43 +143,32 @@ impl StructuralVocabularyIdentity {
     pub fn language(data: &[u8]) -> Self {
         Self::Language(ContentHash::derive(data))
     }
-
-    #[cfg(test)]
-    pub(crate) fn fixture(label: &[u8]) -> Self {
-        Self::Fixture(ContentHash::derive(label))
-    }
-
-    fn is_fixture(self) -> bool {
-        matches!(self, Self::Fixture(_))
-    }
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct TableIdentityPayload<Record = StructuralRule> {
-    language: EncodedLanguage,
+pub struct TableIdentityPayload<Root, Record = StructuralRule<Root>> {
     target_layout_identity: TargetLayoutIdentity,
     token_profile_identity: ContentHash<TokenProfileDomain>,
     vocabulary_identity: StructuralVocabularyIdentity,
     block_discovery: BlockTreeDiscoveryConfiguration,
     textual_rendering: TextualRenderingPolicy,
-    entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
+    entries: Vec<StructuralEntry<Root, Record>>,
 }
 
-impl<Record> TableIdentityPayload<Record> {
+impl<Root: Ord, Record> TableIdentityPayload<Root, Record> {
     /// Assemble the complete, typed identity pre-image for a structural table.
     /// Content hashes cross this boundary in their typed domains; raw digest
     /// bytes have no authoring path.
     pub fn new(
-        language: EncodedLanguage,
         target_layout_identity: TargetLayoutIdentity,
         token_profile_identity: ContentHash<TokenProfileDomain>,
         vocabulary_identity: StructuralVocabularyIdentity,
         block_discovery: BlockTreeDiscoveryConfiguration,
         textual_rendering: TextualRenderingPolicy,
-        entries: BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
+        mut entries: Vec<StructuralEntry<Root, Record>>,
     ) -> Self {
+        entries.sort_by(|left, right| left.encoded_type().cmp(right.encoded_type()));
         Self {
-            language,
             target_layout_identity,
             token_profile_identity,
             vocabulary_identity,
@@ -257,14 +186,14 @@ impl HashDomain for StructuralTableDomain {
     fn separation() -> DomainSeparation {
         DomainSeparation::Contextual {
             context: "structural-codec 2026 addressed structural table",
-            layout: LayoutVersion::new(8),
+            layout: LayoutVersion::new(10),
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct AddressedStructuralTable<Record = StructuralRule> {
-    payload: TableIdentityPayload<Record>,
+pub struct AddressedStructuralTable<Root, Record = StructuralRule<Root>> {
+    payload: TableIdentityPayload<Root, Record>,
     identity: ContentHash<StructuralTableDomain>,
     profile: SealedTokenProfile,
     block_discovery: SealedBlockTreeDiscoveryConfiguration,
@@ -278,9 +207,9 @@ pub trait ArchivedTablePayload {
     fn table_identity(&self) -> Result<ContentHash<StructuralTableDomain>, ArchiveError>;
 }
 
-impl<Record> ArchivedTablePayload for TableIdentityPayload<Record>
+impl<Root, Record> ArchivedTablePayload for TableIdentityPayload<Root, Record>
 where
-    Record: rkyv::Archive
+    Self: rkyv::Archive
         + for<'serialize> rkyv::Serialize<
             rkyv::rancor::Strategy<
                 rkyv::ser::Serializer<
@@ -299,13 +228,17 @@ where
     }
 }
 
-impl<Record: StructureRecord> AddressedStructuralTable<Record> {
+impl<Root, Record> AddressedStructuralTable<Root, Record>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
     pub fn seal(
-        payload: TableIdentityPayload<Record>,
+        payload: TableIdentityPayload<Root, Record>,
         profile: &SealedTokenProfile,
-    ) -> Result<Self, TableError>
+    ) -> Result<Self, TableError<Root>>
     where
-        TableIdentityPayload<Record>: ArchivedTablePayload,
+        TableIdentityPayload<Root, Record>: ArchivedTablePayload,
     {
         if payload.token_profile_identity != profile.identity() {
             return Err(TableError::TokenProfileIdentityMismatch);
@@ -324,8 +257,11 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
     pub fn identity(&self) -> ContentHash<StructuralTableDomain> {
         self.identity
     }
-    pub fn entry(&self, expected: ScopedEncodedTypeId) -> Option<&StructuralEntry<Record>> {
-        self.payload.entries.get(&expected)
+    pub fn entry(&self, expected: &EncodedTypeId<Root>) -> Option<&StructuralEntry<Root, Record>> {
+        self.payload
+            .entries
+            .iter()
+            .find(|entry| entry.encoded_type() == expected)
     }
     pub fn token_profile_identity(&self) -> ContentHash<TokenProfileDomain> {
         self.payload.token_profile_identity
@@ -349,63 +285,47 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
     pub fn vocabulary_identity(&self) -> StructuralVocabularyIdentity {
         self.payload.vocabulary_identity
     }
-    pub fn language(&self) -> EncodedLanguage {
-        self.payload.language
-    }
-
     fn validate(
-        payload: &TableIdentityPayload<Record>,
+        payload: &TableIdentityPayload<Root, Record>,
         profile: &SealedTokenProfile,
-    ) -> Result<(), TableError> {
-        for type_id in payload.entries.keys() {
-            if type_id.language() != payload.language {
-                return Err(TableError::LanguageMismatch {
-                    table: payload.language,
-                    encoded: *type_id,
-                });
-            }
-            if payload.vocabulary_identity.is_fixture() != type_id.is_reserved_fixture_schema() {
-                return Err(if payload.vocabulary_identity.is_fixture() {
-                    TableError::FixtureVocabularyHasProductionId
-                } else {
-                    TableError::ReservedFixtureIdInLanguageTable
-                });
-            }
-        }
+    ) -> Result<(), TableError<Root>> {
         Self::validate_textual_rendering(
             &payload.textual_rendering,
             profile,
             &payload.block_discovery,
         )?;
-        for (type_id, entry) in &payload.entries {
-            if entry.encoded_type() != *type_id {
-                return Err(TableError::EntryKeyMismatch {
-                    entry: entry.encoded_type(),
-                    key: *type_id,
+        let mut encoded_types = std::collections::BTreeSet::new();
+        for entry in &payload.entries {
+            let type_id = entry.encoded_type();
+            if !encoded_types.insert(type_id.clone()) {
+                return Err(TableError::DuplicateEncodedType {
+                    entry: type_id.clone(),
                 });
             }
             if entry.constructors().is_empty() {
-                return Err(TableError::EmptyEntry { entry: *type_id });
+                return Err(TableError::EmptyEntry {
+                    entry: type_id.clone(),
+                });
             }
             let mut constructors = std::collections::BTreeSet::new();
             for codec in entry.constructors() {
-                if !constructors.insert(codec.constructor()) {
+                if !constructors.insert(codec.constructor().clone()) {
                     return Err(TableError::DuplicateConstructor {
-                        entry: *type_id,
-                        constructor: codec.constructor(),
+                        entry: type_id.clone(),
+                        constructor: codec.constructor().clone(),
                     });
                 }
-                if codec.constructor().type_id() != *type_id {
+                if codec.constructor().type_id() != type_id {
                     return Err(TableError::ConstructorUnderWrongEntry {
-                        constructor: codec.constructor(),
-                        entry: *type_id,
+                        constructor: codec.constructor().clone(),
+                        entry: type_id.clone(),
                     });
                 }
                 let mut forms = std::collections::BTreeSet::new();
                 for accepted in codec.decode_forms() {
                     if !forms.insert(accepted.identity()) {
                         return Err(TableError::DuplicateDecodeForm {
-                            constructor: codec.constructor(),
+                            constructor: codec.constructor().clone(),
                             form: accepted.identity(),
                         });
                     }
@@ -422,7 +342,7 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
         policy: &TextualRenderingPolicy,
         profile: &SealedTokenProfile,
         block_discovery: &BlockTreeDiscoveryConfiguration,
-    ) -> Result<(), TableError> {
+    ) -> Result<(), TableError<Root>> {
         let contexts = block_discovery.boundaries().contexts();
         if policy.contexts().len() != contexts.len()
             || !policy
@@ -480,17 +400,17 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
         rule: &Record,
         profile: &SealedTokenProfile,
         block_discovery: &BlockTreeDiscoveryConfiguration,
-    ) -> Result<(), TableError> {
-        struct Roles {
-            values: BTreeMap<StableRoleId, SharedDescriptor>,
+    ) -> Result<(), TableError<Root>> {
+        struct Roles<Root> {
+            values: BTreeMap<StableRoleId, SharedDescriptor<Root>>,
             duplicate: Option<StableRoleId>,
             zero: bool,
             mismatch: Option<(StableRoleId, StableRoleId)>,
         }
-        impl FieldVisitor for Roles {
+        impl<Root: Clone> FieldVisitor<Root> for Roles<Root> {
             fn field<Role: crate::ids::FieldRole>(
                 &mut self,
-                position: &crate::form::Position<Role>,
+                position: &crate::form::Position<Role, Root>,
             ) {
                 let expected = StableRoleId::for_role::<Role>();
                 let actual = position.role();
@@ -532,11 +452,11 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
     }
 
     fn validate_descriptor(
-        descriptor: &SharedDescriptor,
-        roles: &BTreeMap<StableRoleId, SharedDescriptor>,
+        descriptor: &SharedDescriptor<Root>,
+        roles: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
         profile: &SealedTokenProfile,
         block_discovery: &BlockTreeDiscoveryConfiguration,
-    ) -> Result<(), TableError> {
+    ) -> Result<(), TableError<Root>> {
         match descriptor {
             SharedDescriptor::Application {
                 operator,
@@ -586,7 +506,7 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
             SharedDescriptor::Repeated { element, .. } => {
                 Self::validate_descriptor(element, roles, profile, block_discovery)?
             }
-            SharedDescriptor::Atom(atom) => {
+            SharedDescriptor::Declaration(atom) | SharedDescriptor::Reference(atom) => {
                 if let Some(trigger) = atom.trigger {
                     if !matches!(
                         profile.definition(trigger)?.trigger,
@@ -598,70 +518,25 @@ impl<Record: StructureRecord> AddressedStructuralTable<Record> {
                     }
                 }
             }
+            SharedDescriptor::OrderedProduct(product) => {
+                let mut members = std::collections::BTreeSet::new();
+                for role in product.members() {
+                    if !members.insert(*role) {
+                        return Err(TableError::DuplicateProductRole { role: *role });
+                    }
+                    let child = roles
+                        .get(role)
+                        .ok_or(TableError::MissingRole { role: *role })?;
+                    if !matches!(child, SharedDescriptor::Delegate { .. }) {
+                        return Err(TableError::ProductMemberNotDelegate { role: *role });
+                    }
+                    Self::validate_descriptor(child, roles, profile, block_discovery)?;
+                }
+            }
             SharedDescriptor::Literal(_)
             | SharedDescriptor::Leaf(_)
             | SharedDescriptor::Delegate { .. } => {}
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::codec::{AcceptedDecodeForm, ConstructorCodec};
-    use crate::form::{AtomDescriptor, SharedDescriptor, StructuralRule, UnaryRule};
-    use crate::ids::{DecodeFormId, EncodedConstructorId, ScopedEncodedTypeId};
-
-    fn logos_entry() -> StructuralEntry {
-        let type_id = ScopedEncodedTypeId::logos(3);
-        let rule = StructuralRule::Unary(
-            UnaryRule::new(SharedDescriptor::Atom(AtomDescriptor::any_case())).expect("role"),
-        );
-        StructuralEntry::new(
-            type_id,
-            vec![ConstructorCodec::new(
-                EncodedConstructorId::under(type_id, 1),
-                vec![AcceptedDecodeForm::new(DecodeFormId::new(1), rule.clone())],
-                rule,
-            )],
-        )
-    }
-
-    #[test]
-    fn wrong_language_and_profile_identity_are_refused_at_seal() {
-        let profile = crate::fixture::FixtureBuilder::token_profile();
-        let base = TableIdentityPayload::new(
-            EncodedLanguage::Schema,
-            TargetLayoutIdentity::derive(b"test target layout"),
-            profile.identity(),
-            StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
-            crate::fixture::FixtureBuilder::block_discovery(),
-            crate::fixture::FixtureBuilder::textual_rendering(),
-            BTreeMap::from([(logos_entry().encoded_type(), logos_entry())]),
-        );
-        assert!(matches!(
-            AddressedStructuralTable::seal(base, &profile),
-            Err(TableError::LanguageMismatch { .. })
-        ));
-
-        let other_profile = raw_discovery::RawProfile::nomos_extended()
-            .seal()
-            .expect("valid alternate profile");
-        let zero: TableIdentityPayload = TableIdentityPayload::new(
-            EncodedLanguage::Schema,
-            TargetLayoutIdentity::derive(b"test target layout"),
-            other_profile.identity(),
-            StructuralVocabularyIdentity::fixture(b"test fixture vocabulary"),
-            crate::fixture::FixtureBuilder::block_discovery(),
-            crate::fixture::FixtureBuilder::textual_rendering(),
-            BTreeMap::new(),
-        );
-        assert!(matches!(
-            AddressedStructuralTable::seal(zero, &profile),
-            Err(TableError::TokenProfileIdentityMismatch)
-        ));
     }
 }

@@ -1,95 +1,93 @@
 # structural-codec architecture
 
-The crate owns the archived structural-codec sidecar and its one shared
-evaluator. It depends on `content-identity`, `name-table`, and `raw-discovery`;
-it does not own a language parser or a second language-specific interpreter.
+The crate owns archived structural rule records, one conservative
+disjointness prover, and one shared evaluator. It does not own a language
+parser, identity allocator, name-table writer, or second language-specific
+interpreter.
 
-## R3 fixed rules
+## Typed rules
 
-Fixed positions are actual archived record fields. `Position<Role, Descriptor>`
-stores both a descriptor and an archived stable role identity. A role marker alone
-is never the identity. `FieldLink` is a borrowed heterogeneous view used only
-while the shared evaluator or prover traverses a record; it is not archivable.
+Fixed positions are actual archived record fields.
+`Position<Role, Root, Descriptor>` stores a descriptor and the stable identity
+of its typed role. `FieldLink` is only a borrowed traversal view and cannot be
+archived.
 
-`ConstructorCodec<R>`, `StructuralEntry<R>`, `TableIdentityPayload<R>`,
-`AddressedStructuralTable<R>`, `StructuralEvaluator<R>`, and the prover all
-operate over a record `R` that exposes only its borrowed typed fields and root
-role through `StructureRecord`. `StructuralRule` remains the kernel convenience
-vocabulary; it is not the only accepted rule carrier. A downstream vocabulary
-combines several archived record types with `RuleCoproduct<L, R>`, whose branch
-match selects data only. Decode, encode, boundary lookup, and proof all run in
-`StructuralEvaluator` or `disjoint`; no record trait supplies those algorithms.
-A fixed product, positional signature, fixed-position vector, and position
-counting have no persisted representation.
+`OrderedProduct` links those real typed fields in source order. Its links can
+only be minted from `FieldRole` types, and sealing requires every member to be
+a delegated expected type. Decode consumes exactly one discovered sibling
+block per member; consumers retrieve each result and source bound by its role,
+never through an indexed root vector.
 
-## R4 identities and sidecars
+All table, proof, decode, and encode machinery is generic over a caller-supplied
+root enum and a `StructureRecord<Root>`. `StructuralRule<Root>` is the kernel
+convenience vocabulary. Downstream typed records can be combined with
+`RuleCoproduct`; the branches select data only.
 
-`ScopedEncodedTypeId` and `EncodedConstructorId` are opaque archived values.
-Their private Schema/Logos/Nomos variants carry `u16` locals, and constructor
-identity contains its owning type identity. Public associated constructors mint
-the language-qualified type and constructor-under-type associations; a table
-then rejects duplicate constructor/form identities and any entry, constructor,
-or language disagreement. Alternative vector order consequently cannot select
-meaning.
+Accepted forms are identified by stable constructor and form identities.
+Vector order never selects meaning. Every pair of accepted forms must be
+provably disjoint over typed positions. An overlap is refused at seal.
+Table entries are canonically sorted by complete encoded type identity before
+the table identity is derived.
 
-The table pins its `ContentHash<TokenProfileDomain>` directly. Its target layout
-uses a structural-codec-owned `TargetLayoutDomain`; raw bytes and zero/default
-layout identities have no API. Table data also holds a typed vocabulary identity.
-Fixture vocabularies have their own content-hash domain and may contain only the
-reserved Schema range, preventing accidental composition with production
-sidecars.
+## Encoded-ID chains and name roles
 
-`StructuralTableDomain` moves from layout 7 to layout 8 because the archived
-identity payload now includes the canonical pass-one discovery configuration
-and the explicit per-context textual rendering policy. That policy selects a
-canonical whitespace separator and carrier trigger without assigning meaning to
-trigger-set order.
-`StructuralValueDomain` remains at layout 2: the archived value stays
-constructor-tagged and role-keyed.
+`EncodedTypeId<Root>` retains one complete non-empty
+`name_table::EncodedId<Root>`. It has no flat local projection and no
+Schema/Logos/Nomos component dimension. `EncodedConstructorId<Root>` keeps its
+complete owning type identity plus a constructor-local number.
 
-## Boundaries and values
+Named structural positions are explicit:
 
-Delimited descriptors name the authoritative profile boundary trigger; they do
-not duplicate `raw-discovery::Delimiter` in a table preimage. A sealed table
-owns the exact sealed token profile and its canonical, archiveable
-block-discovery configuration. It validates both together while sealing and
-includes the rules in the table identity payload. Text first creates a complete
-source-bounded `DiscoveredBlockTree` from those table-owned rules. The one
-shared evaluator then interprets every expected descriptor against a sequential
-bounded cursor: source extent, next discovered child index, and the exact active
-discovery context. Products advance field-by-field, repetition advances
-element-by-element, applications consume their expected operator at the current
-cursor, and delimited/item boundaries enter an already-discovered child. It
-never splits an interior, performs a global trigger scan, or reconstructs a raw
-`Block`/`Document`; raw-`Block` evaluator methods are retired.
+- `Declaration` consumes a `DeclarationAssignment<Root>` already issued by
+  sema-translator.
+- `Reference` consumes a `ResolvedReference<Root>` from lookup-only caller
+  state.
+- `Literal` carries the complete encoded ID of a fixed vocabulary word.
 
-Each opened boundary derives its interior context from the sealed transition
-data. Only that context's carriers and trivia are consulted. Textual encoding
-follows the same descriptor/context path and uses the table's explicit policy
-for separators and carriers. Missing or invalid policy is refused rather than
-being resolved by ASCII space, trigger order, or a global default.
+`DecodeNameBindings` has distinct methods for declarations and references and
+receives the exact source bound. Equal spellings in different modules can
+therefore resolve differently without this crate inventing module context.
+`EncodedNameResolver` provides read-only spelling projection for encoding and
+literal comparison.
 
-The evaluator result is `StructuralValue { constructor, fields }`, where
-`fields` is a `RoleKeyedMirror`. A manual `Textual::reflect` starts a checked
-`StructuralValue::record` and adds values only through typed field roles;
-`reify` retrieves them through the same typed role API. Reification and
-reflection stay manual on `Textual`; no grammar or ordering logic is derived
-there. Several accepted text forms may map to one constructor, subject to the
-conservative disjointness proof. Delegate payload constraints participate in
-that proof, and active delegate expansion is a typed cycle error.
-`MissingLexicon` and name-resolution failures remain distinct from
-`LiteralMismatch`; only a genuine structural non-match may try a disjoint
-alternative. A `Textual` implementation supplies the table but no parallel
-profile or discovery configuration, and its encoded form is statically
-associated with the same language marker as its textual view.
+There is no allocation method, mutable name table, identity-continuation
+mechanism, cross-root fallback, or flattened identifier. Missing assignments,
+unresolved references, and unknown spelling projections fail typed.
 
-## Evaluator equivalence witness
+## Shared evaluation
 
-The conformance harness compares an independently implemented codec with the
-table evaluator over the same fixture sources. It checks the structural value,
-the NameTable delta, canonical output, and whether each path accepts or returns
-a typed error. The live witness uses a test-only independently authored Pascal
-atom codec, so both sides exercise name allocation as well as refusal.
+Pass one builds a complete source-bounded block tree from the table-owned
+discovery configuration. Pass two walks expected typed records through one
+bounded cursor. Token reads consume the longest run accepted at the current
+lexical position. Typed disjointness and conservative refusal govern above the
+token level.
 
-The witness lives here with the comparison contract and evaluator it protects.
-The former derive repository stays frozen; no generation path is revived.
+Products advance field by field, repetition advances element by element,
+applications consume their expected operator, and bounded descriptors enter
+already-discovered children. Encoding follows the same descriptors in reverse
+under the table-owned rendering policy.
+
+The result is a constructor-tagged `StructuralValue<Root>` whose role-keyed
+fields retain declaration, reference, and literal roles as distinct variants.
+`decode_text_bounded` additionally returns runtime-only, full-source
+`SourceBound`s keyed by those same typed roles.
+`Textual::reify` and `Textual::reflect` remain the only consumer-supplied value
+mappings.
+
+## Deliberate boundaries
+
+The crate does not define the production root variants or emitted textual
+encoding of an encoded-ID chain. It does not define Capsule/table pin
+composition, move, retirement, dynamic-enum identity, or recursive per-thing
+content hashing.
+
+The table identity layout is 10 because the archived identity payload now
+carries generic full-chain identities, typed name-position roles, and the
+ordered-product descriptor.
+
+The former internal test corpus depended on the retired flat, locally
+allocating `NameTable` API. Its structural/refusal claims are rehomed in the
+public `downstream_authoring` contract, including two unrelated root enums,
+full-chain preservation, declaration/reference separation, lookup refusal,
+token longest-match, typed overlap refusal, and six sibling typed root blocks
+with exact source bounds and typed arity/position refusal.

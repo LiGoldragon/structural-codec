@@ -1,10 +1,10 @@
 //! Constructor-addressed archived typed rule records.
 
 use crate::form::StructuralRule;
-use crate::ids::{DecodeFormId, EncodedConstructorId, ScopedEncodedTypeId};
+use crate::ids::{DecodeFormId, EncodedConstructorId, EncodedTypeId};
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct AcceptedDecodeForm<Record = StructuralRule> {
+pub struct AcceptedDecodeForm<Record> {
     identity: DecodeFormId,
     rule: Record,
 }
@@ -27,18 +27,18 @@ impl<Record> AcceptedDecodeForm<Record> {
 
 /// One constructor's many disjoint accepted forms and one canonical form.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct ConstructorCodec<Record = StructuralRule> {
-    constructor: EncodedConstructorId,
+pub struct ConstructorCodec<Root, Record = StructuralRule<Root>> {
+    constructor: EncodedConstructorId<Root>,
     decode_forms: Vec<AcceptedDecodeForm<Record>>,
     encode_form: Record,
 }
 
-impl<Record> ConstructorCodec<Record> {
+impl<Root, Record> ConstructorCodec<Root, Record> {
     /// Construct a codec under its explicit constructor identity. Sealing
     /// verifies that identity belongs to the enclosing entry and that decode
     /// form identities are unique.
     pub fn new(
-        constructor: EncodedConstructorId,
+        constructor: EncodedConstructorId<Root>,
         decode_forms: Vec<AcceptedDecodeForm<Record>>,
         encode_form: Record,
     ) -> Self {
@@ -49,8 +49,8 @@ impl<Record> ConstructorCodec<Record> {
         }
     }
 
-    pub fn constructor(&self) -> EncodedConstructorId {
-        self.constructor
+    pub fn constructor(&self) -> &EncodedConstructorId<Root> {
+        &self.constructor
     }
 
     pub fn decode_forms(&self) -> &[AcceptedDecodeForm<Record>] {
@@ -65,17 +65,17 @@ impl<Record> ConstructorCodec<Record> {
 /// Every constructor codec for one encoded type. Constructor identities, not
 /// vector order, choose the canonical encoder.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct StructuralEntry<Record = StructuralRule> {
-    encoded_type: ScopedEncodedTypeId,
-    constructors: Vec<ConstructorCodec<Record>>,
+pub struct StructuralEntry<Root, Record = StructuralRule<Root>> {
+    encoded_type: EncodedTypeId<Root>,
+    constructors: Vec<ConstructorCodec<Root, Record>>,
 }
 
-impl<Record> StructuralEntry<Record> {
+impl<Root, Record> StructuralEntry<Root, Record> {
     /// Construct all codecs for one encoded type. The table seal is the
     /// uniqueness and disjointness boundary for this collection.
     pub fn new(
-        encoded_type: ScopedEncodedTypeId,
-        constructors: Vec<ConstructorCodec<Record>>,
+        encoded_type: EncodedTypeId<Root>,
+        constructors: Vec<ConstructorCodec<Root, Record>>,
     ) -> Self {
         Self {
             encoded_type,
@@ -83,11 +83,11 @@ impl<Record> StructuralEntry<Record> {
         }
     }
 
-    pub fn encoded_type(&self) -> ScopedEncodedTypeId {
-        self.encoded_type
+    pub fn encoded_type(&self) -> &EncodedTypeId<Root> {
+        &self.encoded_type
     }
 
-    pub fn constructors(&self) -> &[ConstructorCodec<Record>] {
+    pub fn constructors(&self) -> &[ConstructorCodec<Root, Record>] {
         &self.constructors
     }
 }

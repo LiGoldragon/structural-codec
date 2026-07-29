@@ -1,17 +1,18 @@
 //! Shared descriptor data and archived typed rule records.
 //!
-//! Fixed grammar positions are never a product vector. They are real fields of
-//! one of the archived records below, each carrying a non-erased stable role.
-//! `FieldLink` is the only heterogeneous representation; it borrows records for
-//! traversal and is deliberately not archivable or storable in a table.
+//! Fixed grammar positions are real fields of one of the archived records
+//! below, each carrying a non-erased stable role. An ordered product stores
+//! only links to those typed fields; it never stores the fields or their
+//! descriptors in an untyped vector. `FieldLink` is the borrowed heterogeneous
+//! traversal representation and is deliberately not archivable.
 
 use std::marker::PhantomData;
 
-use name_table::Identifier;
+use name_table::EncodedId;
 use raw_discovery::{Atom, AtomCase, TriggerIdentifier};
 
 use crate::error::AuthoringError;
-use crate::ids::{FieldRole, RoleIdentity, ScopedEncodedTypeId, StableRoleId};
+use crate::ids::{EncodedTypeId, FieldRole, RoleIdentity, StableRoleId};
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct AtomDescriptor {
@@ -77,23 +78,72 @@ pub enum LeafCodec {
 )]
 pub struct ForeignLeafId(u16);
 
+/// An ordered product of real typed positions.
+///
+/// Member links can only be minted from [`FieldRole`] types. The linked
+/// positions remain separate archived fields in the enclosing record, so a
+/// consumer retrieves their values by role rather than by numeric index.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct OrderedProduct {
+    members: Vec<StableRoleId>,
+}
+
+impl OrderedProduct {
+    /// Start a non-empty product with one typed field role.
+    pub fn try_new<Role: FieldRole>() -> Result<Self, AuthoringError> {
+        let member = RoleIdentity::<Role>::try_for_role()?.stable();
+        Ok(Self {
+            members: vec![member],
+        })
+    }
+
+    /// Append one typed field role to the product.
+    pub fn then<Role: FieldRole>(mut self) -> Result<Self, AuthoringError> {
+        let member = RoleIdentity::<Role>::try_for_role()?.stable();
+        if self.members.contains(&member) {
+            return Err(AuthoringError::DuplicateRoleIdentity { role: member });
+        }
+        self.members.push(member);
+        Ok(self)
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    pub(crate) fn members(&self) -> &[StableRoleId] {
+        &self.members
+    }
+}
+
 /// Data interpreted by the one evaluator. Role links name actual fields in the
-/// enclosing archived record; no fixed rule is represented as a recursive
-/// generic layout or an indexed sequence.
+/// enclosing archived record; fixed position payloads are never stored in a
+/// recursive generic layout or retrieved by numeric index.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 #[rkyv(
     serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source),
     deserialize_bounds(__D::Error: rkyv::rancor::Source),
     bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
 )]
-pub enum SharedDescriptor {
-    Atom(AtomDescriptor),
-    Literal(Identifier),
+pub enum SharedDescriptor<Root> {
+    /// A declaration spelling whose identity is supplied by the translator.
+    Declaration(AtomDescriptor),
+    /// A reference spelling resolved by lookup-only caller state.
+    Reference(AtomDescriptor),
+    /// A fixed vocabulary word identified by its complete encoded-ID chain.
+    Literal(EncodedId<Root>),
     Leaf(LeafCodec),
     Delegate {
-        target: ScopedEncodedTypeId,
+        target: EncodedTypeId<Root>,
         payload: Option<DelegationPayload>,
     },
+    /// A fixed ordered sequence of sibling source blocks. Every linked role
+    /// must carry a [`SharedDescriptor::Delegate`]; sealing verifies this.
+    OrderedProduct(OrderedProduct),
     Application {
         operator: TriggerIdentifier,
         head: StableRoleId,
@@ -107,7 +157,7 @@ pub enum SharedDescriptor {
         minimum: u64,
         maximum: Option<u64>,
         #[rkyv(omit_bounds)]
-        element: Box<SharedDescriptor>,
+        element: Box<SharedDescriptor<Root>>,
     },
     /// A named boundary whose item extent is discovered before the item is
     /// evaluated. It is the generic hook for future language item rules.
@@ -121,12 +171,13 @@ pub enum SharedDescriptor {
 /// the archive, preventing a type-only phantom role from disappearing from a
 /// table identity.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct Position<Role, Descriptor = SharedDescriptor> {
+pub struct Position<Role, Root, Descriptor = SharedDescriptor<Root>> {
     role: RoleIdentity<Role>,
     descriptor: Descriptor,
+    vocabulary_root: PhantomData<fn() -> Root>,
 }
 
-impl<Role: FieldRole, Descriptor> Position<Role, Descriptor> {
+impl<Role: FieldRole, Root, Descriptor> Position<Role, Root, Descriptor> {
     /// Construct a position carrying the stable identity declared by `Role`.
     /// The only invalid role identity (zero) is rejected before it can enter an
     /// archived rule record.
@@ -134,6 +185,7 @@ impl<Role: FieldRole, Descriptor> Position<Role, Descriptor> {
         Ok(Self {
             role: RoleIdentity::try_for_role()?,
             descriptor,
+            vocabulary_root: PhantomData,
         })
     }
 
@@ -150,38 +202,40 @@ impl<Role: FieldRole, Descriptor> Position<Role, Descriptor> {
 /// grammar algorithm: it can only expose positions to shared traversal.
 pub struct FieldEnd;
 
-pub struct FieldLink<'record, Role, Tail> {
-    head: &'record Position<Role>,
+pub struct FieldLink<'record, Role, Root, Tail> {
+    head: &'record Position<Role, Root>,
     tail: Tail,
 }
 
-impl<'record, Role, Tail> FieldLink<'record, Role, Tail> {
-    pub fn new(head: &'record Position<Role>, tail: Tail) -> Self {
+impl<'record, Role, Root, Tail> FieldLink<'record, Role, Root, Tail> {
+    pub fn new(head: &'record Position<Role, Root>, tail: Tail) -> Self {
         Self { head, tail }
     }
 }
 
-pub trait FieldVisitor {
-    fn field<Role: FieldRole>(&mut self, position: &Position<Role>);
+pub trait FieldVisitor<Root> {
+    fn field<Role: FieldRole>(&mut self, position: &Position<Role, Root>);
 }
 
-pub trait BorrowedFieldView {
-    fn expose<Visitor: FieldVisitor>(&self, visitor: &mut Visitor);
+pub trait BorrowedFieldView<Root> {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor);
 }
 
-impl BorrowedFieldView for FieldEnd {
-    fn expose<Visitor: FieldVisitor>(&self, _visitor: &mut Visitor) {}
+impl<Root> BorrowedFieldView<Root> for FieldEnd {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, _visitor: &mut Visitor) {}
 }
 
-impl<Role: FieldRole, Tail: BorrowedFieldView> BorrowedFieldView for FieldLink<'_, Role, Tail> {
-    fn expose<Visitor: FieldVisitor>(&self, visitor: &mut Visitor) {
+impl<Root, Role: FieldRole, Tail: BorrowedFieldView<Root>> BorrowedFieldView<Root>
+    for FieldLink<'_, Role, Root, Tail>
+{
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor) {
         visitor.field(self.head);
         self.tail.expose(visitor);
     }
 }
 
-pub trait StructureRecord {
-    type View<'record>: BorrowedFieldView
+pub trait StructureRecord<Root> {
+    type View<'record>: BorrowedFieldView<Root>
     where
         Self: 'record;
 
@@ -223,25 +277,28 @@ role!(ApplicationDelimitedItems, 8);
 
 /// One actual fixed-position rule with one root field.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct UnaryRule {
-    root: Position<UnaryRoot>,
+pub struct UnaryRule<Root> {
+    root: Position<UnaryRoot, Root>,
 }
 
-impl UnaryRule {
+impl<Root> UnaryRule<Root> {
     /// Construct the one fixed field of a unary rule.
-    pub fn new(root: SharedDescriptor) -> Result<Self, AuthoringError> {
+    pub fn new(root: SharedDescriptor<Root>) -> Result<Self, AuthoringError> {
         Ok(Self {
             root: Position::try_new(root)?,
         })
     }
 
-    pub fn root(&self) -> &Position<UnaryRoot> {
+    pub fn root(&self) -> &Position<UnaryRoot, Root> {
         &self.root
     }
 }
 
-impl StructureRecord for UnaryRule {
-    type View<'record> = FieldLink<'record, UnaryRoot, FieldEnd>;
+impl<Root> StructureRecord<Root> for UnaryRule<Root> {
+    type View<'record>
+        = FieldLink<'record, UnaryRoot, Root, FieldEnd>
+    where
+        Root: 'record;
 
     fn root_role(&self) -> StableRoleId {
         self.root.role()
@@ -253,20 +310,20 @@ impl StructureRecord for UnaryRule {
 
 /// An actual record for a fixed two-position application.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct ApplicationRule {
-    application: Position<ApplicationRoot>,
-    head: Position<ApplicationHead>,
-    payload: Position<ApplicationPayload>,
+pub struct ApplicationRule<Root> {
+    application: Position<ApplicationRoot, Root>,
+    head: Position<ApplicationHead, Root>,
+    payload: Position<ApplicationPayload, Root>,
 }
 
-impl ApplicationRule {
+impl<Root> ApplicationRule<Root> {
     /// Construct the three typed fields of an application rule. The root's
     /// links are minted from the two field-role types, never supplied as raw
     /// numeric positions by a caller.
     pub fn new(
         operator: TriggerIdentifier,
-        head: SharedDescriptor,
-        payload: SharedDescriptor,
+        head: SharedDescriptor<Root>,
+        payload: SharedDescriptor<Root>,
     ) -> Result<Self, AuthoringError> {
         Ok(Self {
             application: Position::try_new(SharedDescriptor::Application {
@@ -279,25 +336,34 @@ impl ApplicationRule {
         })
     }
 
-    pub fn application(&self) -> &Position<ApplicationRoot> {
+    pub fn application(&self) -> &Position<ApplicationRoot, Root> {
         &self.application
     }
 
-    pub fn head(&self) -> &Position<ApplicationHead> {
+    pub fn head(&self) -> &Position<ApplicationHead, Root> {
         &self.head
     }
 
-    pub fn payload(&self) -> &Position<ApplicationPayload> {
+    pub fn payload(&self) -> &Position<ApplicationPayload, Root> {
         &self.payload
     }
 }
 
-impl StructureRecord for ApplicationRule {
-    type View<'record> = FieldLink<
+impl<Root> StructureRecord<Root> for ApplicationRule<Root> {
+    type View<'record>
+        = FieldLink<
         'record,
         ApplicationRoot,
-        FieldLink<'record, ApplicationHead, FieldLink<'record, ApplicationPayload, FieldEnd>>,
-    >;
+        Root,
+        FieldLink<
+            'record,
+            ApplicationHead,
+            Root,
+            FieldLink<'record, ApplicationPayload, Root, FieldEnd>,
+        >,
+    >
+    where
+        Root: 'record;
 
     fn root_role(&self) -> StableRoleId {
         self.application.role()
@@ -313,20 +379,20 @@ impl StructureRecord for ApplicationRule {
 /// An actual record for `application(head, delimited(repeated(item)))`. The
 /// repeated item is the only runtime sequence and therefore has explicit bounds.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct ApplicationDelimitedRule {
-    application: Position<ApplicationDelimitedRoot>,
-    head: Position<ApplicationDelimitedHead>,
-    body: Position<ApplicationDelimitedBody>,
-    items: Position<ApplicationDelimitedItems>,
+pub struct ApplicationDelimitedRule<Root> {
+    application: Position<ApplicationDelimitedRoot, Root>,
+    head: Position<ApplicationDelimitedHead, Root>,
+    body: Position<ApplicationDelimitedBody, Root>,
+    items: Position<ApplicationDelimitedItems, Root>,
 }
 
-impl ApplicationDelimitedRule {
+impl<Root> ApplicationDelimitedRule<Root> {
     /// Construct the four fixed fields of an application-delimited rule.
     pub fn new(
         operator: TriggerIdentifier,
         boundary: TriggerIdentifier,
-        head: SharedDescriptor,
-        element: SharedDescriptor,
+        head: SharedDescriptor<Root>,
+        element: SharedDescriptor<Root>,
         minimum: u64,
         maximum: Option<u64>,
     ) -> Result<Self, AuthoringError> {
@@ -352,37 +418,43 @@ impl ApplicationDelimitedRule {
         })
     }
 
-    pub fn application(&self) -> &Position<ApplicationDelimitedRoot> {
+    pub fn application(&self) -> &Position<ApplicationDelimitedRoot, Root> {
         &self.application
     }
 
-    pub fn head(&self) -> &Position<ApplicationDelimitedHead> {
+    pub fn head(&self) -> &Position<ApplicationDelimitedHead, Root> {
         &self.head
     }
 
-    pub fn body(&self) -> &Position<ApplicationDelimitedBody> {
+    pub fn body(&self) -> &Position<ApplicationDelimitedBody, Root> {
         &self.body
     }
 
-    pub fn items(&self) -> &Position<ApplicationDelimitedItems> {
+    pub fn items(&self) -> &Position<ApplicationDelimitedItems, Root> {
         &self.items
     }
 }
 
-impl StructureRecord for ApplicationDelimitedRule {
-    type View<'record> = FieldLink<
+impl<Root> StructureRecord<Root> for ApplicationDelimitedRule<Root> {
+    type View<'record>
+        = FieldLink<
         'record,
         ApplicationDelimitedRoot,
+        Root,
         FieldLink<
             'record,
             ApplicationDelimitedHead,
+            Root,
             FieldLink<
                 'record,
                 ApplicationDelimitedBody,
-                FieldLink<'record, ApplicationDelimitedItems, FieldEnd>,
+                Root,
+                FieldLink<'record, ApplicationDelimitedItems, Root, FieldEnd>,
             >,
         >,
-    >;
+    >
+    where
+        Root: 'record;
 
     fn root_role(&self) -> StableRoleId {
         self.application.role()
@@ -402,13 +474,13 @@ impl StructureRecord for ApplicationDelimitedRule {
 /// data only; decode, encode, boundary work, and proof remain in shared
 /// machinery.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub enum StructuralRule {
-    Unary(UnaryRule),
-    Application(ApplicationRule),
-    ApplicationDelimited(ApplicationDelimitedRule),
+pub enum StructuralRule<Root> {
+    Unary(UnaryRule<Root>),
+    Application(ApplicationRule<Root>),
+    ApplicationDelimited(ApplicationDelimitedRule<Root>),
 }
 
-impl StructuralRule {
+impl<Root> StructuralRule<Root> {
     pub(crate) fn root_role(&self) -> StableRoleId {
         match self {
             Self::Unary(rule) => rule.root_role(),
@@ -434,10 +506,10 @@ pub enum RuleCoproductView<Left, Right> {
     Right(Right),
 }
 
-impl<Left: BorrowedFieldView, Right: BorrowedFieldView> BorrowedFieldView
+impl<Root, Left: BorrowedFieldView<Root>, Right: BorrowedFieldView<Root>> BorrowedFieldView<Root>
     for RuleCoproductView<Left, Right>
 {
-    fn expose<Visitor: FieldVisitor>(&self, visitor: &mut Visitor) {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor) {
         match self {
             Self::Left(fields) => fields.expose(visitor),
             Self::Right(fields) => fields.expose(visitor),
@@ -445,7 +517,9 @@ impl<Left: BorrowedFieldView, Right: BorrowedFieldView> BorrowedFieldView
     }
 }
 
-impl<Left: StructureRecord, Right: StructureRecord> StructureRecord for RuleCoproduct<Left, Right> {
+impl<Root, Left: StructureRecord<Root>, Right: StructureRecord<Root>> StructureRecord<Root>
+    for RuleCoproduct<Left, Right>
+{
     type View<'record>
         = RuleCoproductView<Left::View<'record>, Right::View<'record>>
     where
@@ -468,34 +542,43 @@ impl<Left: StructureRecord, Right: StructureRecord> StructureRecord for RuleCopr
 
 /// Borrowed data-only field view of the built-in [`StructuralRule`] convenience
 /// vocabulary.
-pub type ApplicationDelimitedFieldView<'record> = FieldLink<
+pub type ApplicationFieldView<'record, Root> = FieldLink<
+    'record,
+    ApplicationRoot,
+    Root,
+    FieldLink<
+        'record,
+        ApplicationHead,
+        Root,
+        FieldLink<'record, ApplicationPayload, Root, FieldEnd>,
+    >,
+>;
+
+pub type ApplicationDelimitedFieldView<'record, Root> = FieldLink<
     'record,
     ApplicationDelimitedRoot,
+    Root,
     FieldLink<
         'record,
         ApplicationDelimitedHead,
+        Root,
         FieldLink<
             'record,
             ApplicationDelimitedBody,
-            FieldLink<'record, ApplicationDelimitedItems, FieldEnd>,
+            Root,
+            FieldLink<'record, ApplicationDelimitedItems, Root, FieldEnd>,
         >,
     >,
 >;
 
-pub enum StructuralRuleView<'record> {
-    Unary(FieldLink<'record, UnaryRoot, FieldEnd>),
-    Application(
-        FieldLink<
-            'record,
-            ApplicationRoot,
-            FieldLink<'record, ApplicationHead, FieldLink<'record, ApplicationPayload, FieldEnd>>,
-        >,
-    ),
-    ApplicationDelimited(ApplicationDelimitedFieldView<'record>),
+pub enum StructuralRuleView<'record, Root> {
+    Unary(FieldLink<'record, UnaryRoot, Root, FieldEnd>),
+    Application(ApplicationFieldView<'record, Root>),
+    ApplicationDelimited(ApplicationDelimitedFieldView<'record, Root>),
 }
 
-impl BorrowedFieldView for StructuralRuleView<'_> {
-    fn expose<Visitor: FieldVisitor>(&self, visitor: &mut Visitor) {
+impl<Root> BorrowedFieldView<Root> for StructuralRuleView<'_, Root> {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor) {
         match self {
             Self::Unary(fields) => fields.expose(visitor),
             Self::Application(fields) => fields.expose(visitor),
@@ -504,8 +587,11 @@ impl BorrowedFieldView for StructuralRuleView<'_> {
     }
 }
 
-impl StructureRecord for StructuralRule {
-    type View<'record> = StructuralRuleView<'record>;
+impl<Root> StructureRecord<Root> for StructuralRule<Root> {
+    type View<'record>
+        = StructuralRuleView<'record, Root>
+    where
+        Root: 'record;
 
     fn root_role(&self) -> StableRoleId {
         self.root_role()

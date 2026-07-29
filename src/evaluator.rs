@@ -1,12 +1,8 @@
 //! The one shared, source-bounded evaluator over archived typed records.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-#[cfg(test)]
-use std::cell::Cell;
-
-use name_table::{Name, NameInterner, NameResolver, NameTable};
 use raw_discovery::{
     Atom, BlockTree, BoundaryDiscoveryContextIdentifier, BoundaryReader, DiscoveredBlock,
     DiscoveredBlockTree, SealedTokenProfile, SourceBound, Trigger, TriggerIdentifier,
@@ -19,159 +15,104 @@ use crate::form::{
     BorrowedFieldView, FieldVisitor, LeafCodec, Position, SharedDescriptor, StructuralRule,
     StructureRecord,
 };
-use crate::ids::{FieldRole, ScopedEncodedTypeId, StableRoleId};
+use crate::ids::{EncodedTypeId, FieldRole, StableRoleId};
+use crate::names::{
+    DeclarationAssignment, DecodeNameBindings, EncodedNameResolver, NameOccurrence,
+    ResolvedReference,
+};
 use crate::table::AddressedStructuralTable;
-use crate::value::{FieldValue, RoleKeyedMirror, ScalarValue, StructuralValue};
+use crate::value::{
+    FieldValue, RoleKeyedMirror, ScalarValue, SourceBoundedStructuralValue, StructuralValue,
+};
 
-#[cfg(test)]
-thread_local! {
-    static CURSOR_CHILD_INDEX_PROBES: Cell<usize> = const { Cell::new(0) };
+struct DescriptorCollector<Root> {
+    fields: BTreeMap<StableRoleId, SharedDescriptor<Root>>,
 }
 
-#[cfg(test)]
-pub(crate) fn source_cursor_child_index_probes() -> usize {
-    CURSOR_CHILD_INDEX_PROBES.with(Cell::get)
-}
-
-struct DescriptorCollector {
-    fields: BTreeMap<StableRoleId, SharedDescriptor>,
-}
-
-impl FieldVisitor for DescriptorCollector {
-    fn field<Role: FieldRole>(&mut self, position: &Position<Role>) {
+impl<Root: Clone> FieldVisitor<Root> for DescriptorCollector<Root> {
+    fn field<Role: FieldRole>(&mut self, position: &Position<Role, Root>) {
         self.fields
             .insert(position.role(), position.descriptor().clone());
     }
 }
 
-struct DecodeState {
-    fields: BTreeMap<StableRoleId, DraftFieldValue>,
-    roles: BTreeMap<StableRoleId, SharedDescriptor>,
+struct DecodeState<Root> {
+    fields: BTreeMap<StableRoleId, DraftFieldValue<Root>>,
+    field_bounds: BTreeMap<StableRoleId, SourceBound>,
+    roles: BTreeMap<StableRoleId, SharedDescriptor<Root>>,
 }
 
-impl DecodeState {
-    fn descriptor(&self, role: StableRoleId) -> Result<&SharedDescriptor, DecodeError> {
+impl<Root> DecodeState<Root> {
+    fn descriptor(&self, role: StableRoleId) -> Result<&SharedDescriptor<Root>, DecodeError<Root>> {
         self.roles
             .get(&role)
             .ok_or(DecodeError::MissingRole { role })
     }
 }
 
-/// A name reference held before a successful parse has an identifier space.
-/// It is intentionally distinct from `name_table::Identifier`: a literal can
-/// therefore never be mistaken for a speculative atom while a candidate is
-/// still discardable.
-#[derive(Clone, Copy)]
-struct DraftNameIdentifier(usize);
-
-/// The candidate-local, uninterned name ledger.
-///
-/// Each accepted form receives a clone of this ledger.  Only a completed
-/// candidate replaces its caller's ledger, so failed forms have no names to
-/// commit.  The completed root is materialized through the caller's supported
-/// `NameInterner` only after its cursor has proven whole-source completion.
-#[derive(Clone, Default)]
-struct DraftNames {
-    names: Vec<Name>,
-    identifiers: HashMap<Name, DraftNameIdentifier>,
-}
-
-impl DraftNames {
-    fn intern(&mut self, name: Name) -> DraftNameIdentifier {
-        if let Some(&identifier) = self.identifiers.get(&name) {
-            return identifier;
-        }
-        let identifier = DraftNameIdentifier(self.names.len());
-        self.names.push(name.clone());
-        self.identifiers.insert(name, identifier);
-        identifier
-    }
-
-    fn materialize(
-        self,
-        value: DraftStructuralValue,
-        interner: &mut impl NameInterner,
-    ) -> Result<StructuralValue, DecodeError> {
-        let identifiers = self
-            .names
-            .into_iter()
-            .map(|name| interner.intern(name).map_err(DecodeError::from))
-            .collect::<Result<Vec<_>, _>>()?;
-        value.materialize(&identifiers)
-    }
-}
-
-/// The structural mirror before candidate-local names have become durable
-/// identifiers.  This keeps speculative names typed and uninterned rather than
-/// encoding them in a sentinel `Identifier` range.
 #[derive(Clone)]
-struct DraftStructuralValue {
-    constructor: crate::ids::EncodedConstructorId,
-    fields: BTreeMap<StableRoleId, DraftFieldValue>,
+struct DraftStructuralValue<Root> {
+    constructor: crate::ids::EncodedConstructorId<Root>,
+    fields: BTreeMap<StableRoleId, DraftFieldValue<Root>>,
+    field_bounds: BTreeMap<StableRoleId, SourceBound>,
 }
 
-impl DraftStructuralValue {
-    fn materialize(
-        self,
-        identifiers: &[name_table::Identifier],
-    ) -> Result<StructuralValue, DecodeError> {
+impl<Root: Clone> DraftStructuralValue<Root> {
+    fn materialize_value(self) -> StructuralValue<Root> {
         let mut fields = RoleKeyedMirror::default();
         for (role, value) in self.fields {
-            fields.insert(role, value.materialize(identifiers)?);
+            fields.insert(role, value.materialize());
         }
-        Ok(StructuralValue::new(self.constructor, fields))
+        StructuralValue::new(self.constructor, fields)
+    }
+
+    fn materialize_bounded(self) -> SourceBoundedStructuralValue<Root> {
+        let field_bounds = self.field_bounds.clone();
+        SourceBoundedStructuralValue::new(self.materialize_value(), field_bounds)
     }
 }
 
 #[derive(Clone)]
-enum DraftAtom {
-    Interned(DraftNameIdentifier),
-    Literal(name_table::Identifier),
-}
-
-#[derive(Clone)]
-enum DraftFieldValue {
-    Atom(DraftAtom),
+enum DraftFieldValue<Root> {
+    Declaration(DeclarationAssignment<Root>),
+    Reference(ResolvedReference<Root>),
+    Literal(name_table::EncodedId<Root>),
     Scalar(ScalarValue),
-    Delimited(Rc<DraftFieldValue>),
+    OrderedProduct,
+    Delimited(Rc<DraftFieldValue<Root>>),
     Application {
-        head: Rc<DraftFieldValue>,
-        payload: Rc<DraftFieldValue>,
+        head: Rc<DraftFieldValue<Root>>,
+        payload: Rc<DraftFieldValue<Root>>,
     },
-    Delegated(Rc<DraftStructuralValue>),
-    Repeated(Vec<DraftFieldValue>),
+    Delegated(Rc<DraftStructuralValue<Root>>),
+    Repeated(Vec<DraftFieldValue<Root>>),
 }
 
-impl DraftFieldValue {
-    fn materialize(
-        self,
-        identifiers: &[name_table::Identifier],
-    ) -> Result<FieldValue, DecodeError> {
-        Ok(match self {
-            Self::Atom(DraftAtom::Interned(DraftNameIdentifier(index))) => FieldValue::Atom(
-                *identifiers
-                    .get(index)
-                    .ok_or(DecodeError::LeafNotFlattenable)?,
-            ),
-            Self::Atom(DraftAtom::Literal(identifier)) => FieldValue::Atom(identifier),
+impl<Root: Clone> DraftFieldValue<Root> {
+    fn materialize(self) -> FieldValue<Root> {
+        match self {
+            Self::Declaration(assignment) => FieldValue::Declaration(assignment),
+            Self::Reference(reference) => FieldValue::Reference(reference),
+            Self::Literal(identifier) => FieldValue::Literal(identifier),
             Self::Scalar(value) => FieldValue::Scalar(value),
+            Self::OrderedProduct => FieldValue::OrderedProduct,
             Self::Delimited(value) => {
-                FieldValue::Delimited(Box::new(value.as_ref().clone().materialize(identifiers)?))
+                FieldValue::Delimited(Box::new(value.as_ref().clone().materialize()))
             }
             Self::Application { head, payload } => FieldValue::Application {
-                head: Box::new(head.as_ref().clone().materialize(identifiers)?),
-                payload: Box::new(payload.as_ref().clone().materialize(identifiers)?),
+                head: Box::new(head.as_ref().clone().materialize()),
+                payload: Box::new(payload.as_ref().clone().materialize()),
             },
             Self::Delegated(value) => {
-                FieldValue::Delegated(Box::new(value.as_ref().clone().materialize(identifiers)?))
+                FieldValue::Delegated(Box::new(value.as_ref().clone().materialize_value()))
             }
             Self::Repeated(values) => FieldValue::Repeated(
                 values
                     .into_iter()
-                    .map(|value| value.materialize(identifiers))
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .map(DraftFieldValue::materialize)
+                    .collect(),
             ),
-        })
+        }
     }
 }
 
@@ -205,8 +146,8 @@ impl<'source> DecodeContinuation<'source> {
 /// retained because each contributes to the meaning of completion at that
 /// position.
 #[derive(Clone, Eq, PartialEq)]
-struct DecodeProgressKey {
-    expected: ScopedEncodedTypeId,
+struct DecodeProgressKey<Root> {
+    expected: EncodedTypeId<Root>,
     bound_start: usize,
     bound_end: usize,
     child_index: usize,
@@ -222,9 +163,9 @@ enum DecodeContinuationKey {
     Repeated,
 }
 
-impl DecodeProgressKey {
+impl<Root: Clone> DecodeProgressKey<Root> {
     fn at(
-        expected: ScopedEncodedTypeId,
+        expected: &EncodedTypeId<Root>,
         input: &BoundedCursor<'_, '_>,
         continuation: DecodeContinuation<'_>,
     ) -> Self {
@@ -236,7 +177,7 @@ impl DecodeProgressKey {
             DecodeContinuation::Repeated => DecodeContinuationKey::Repeated,
         };
         Self {
-            expected,
+            expected: expected.clone(),
             bound_start: input.bound.start(),
             bound_end: input.bound.end(),
             child_index: input.child_index,
@@ -286,10 +227,13 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         }
     }
 
-    fn active<'table, Record: StructureRecord>(
+    fn active<'table, Root, Record: StructureRecord<Root>>(
         &self,
-        evaluator: &'table StructuralEvaluator<'table, Record>,
-    ) -> Result<&'table raw_discovery::SealedTriggerSet, DecodeError> {
+        evaluator: &'table StructuralEvaluator<'table, Root, Record>,
+    ) -> Result<&'table raw_discovery::SealedTriggerSet, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         Ok(evaluator
             .table
             .block_discovery()
@@ -297,10 +241,13 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
             .map_err(raw_discovery::BlockDiscoveryError::from)?)
     }
 
-    fn local_match<Record: StructureRecord>(
+    fn local_match<Root, Record: StructureRecord<Root>>(
         &self,
-        evaluator: &StructuralEvaluator<'_, Record>,
-    ) -> Result<Option<raw_discovery::TriggerMatch>, DecodeError> {
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
+    ) -> Result<Option<raw_discovery::TriggerMatch>, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         let remaining = SourceBound::checked(self.source, self.position, self.bound.end())?;
         Ok(
             BoundaryReader::within(self.source, evaluator.profile, remaining)?
@@ -308,10 +255,13 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         )
     }
 
-    fn skip_trivia<Record: StructureRecord>(
+    fn skip_trivia<Root, Record: StructureRecord<Root>>(
         &mut self,
-        evaluator: &StructuralEvaluator<'_, Record>,
-    ) -> Result<(), DecodeError> {
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
+    ) -> Result<(), DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         while let Some(matched) = self.local_match(evaluator)? {
             if !matched.is_trivia() {
                 break;
@@ -322,18 +272,19 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
     }
 
     fn next_child_at_cursor(&self) -> Option<&'tree DiscoveredBlock> {
-        #[cfg(test)]
-        CURSOR_CHILD_INDEX_PROBES.with(|probes| probes.set(probes.get() + 1));
         self.children.get(self.child_index).filter(|child| {
             child.cue().bound().start() == self.position
                 && child.cue().bound().end() <= self.bound.end()
         })
     }
 
-    fn finish<Record: StructureRecord>(
+    fn finish<Root, Record: StructureRecord<Root>>(
         &mut self,
-        evaluator: &StructuralEvaluator<'_, Record>,
-    ) -> Result<bool, DecodeError> {
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
+    ) -> Result<bool, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         self.skip_trivia(evaluator)?;
         Ok(self.position == self.bound.end() && self.child_index == self.children.len())
     }
@@ -341,11 +292,14 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
     /// Verify that a type form completed at its enclosing structural
     /// continuation.  This is deliberately cursor-local: it neither searches
     /// forward nor assigns an order to accepted forms.
-    fn completes<Record: StructureRecord>(
+    fn completes<Root, Record: StructureRecord<Root>>(
         &mut self,
-        evaluator: &StructuralEvaluator<'_, Record>,
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
         continuation: DecodeContinuation<'_>,
-    ) -> Result<bool, DecodeError> {
+    ) -> Result<bool, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         match continuation {
             DecodeContinuation::Bound => self.finish(evaluator),
             DecodeContinuation::Before(operator) => {
@@ -371,12 +325,15 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         }
     }
 
-    fn take_bare<Record: StructureRecord>(
+    fn take_bare<Root, Record: StructureRecord<Root>>(
         &mut self,
-        evaluator: &StructuralEvaluator<'_, Record>,
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
         terminator: Option<&str>,
         structural_stops: &[String],
-    ) -> Result<SourceBound, DecodeError> {
+    ) -> Result<SourceBound, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         self.skip_trivia(evaluator)?;
         if self.position == self.bound.end() || self.next_child_at_cursor().is_some() {
             return Err(DecodeError::BlockKindMismatch {
@@ -420,10 +377,13 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         Ok(SourceBound::checked(self.source, start, self.position)?)
     }
 
-    fn take_carrier<Record: StructureRecord>(
+    fn take_carrier<Root, Record: StructureRecord<Root>>(
         &mut self,
-        evaluator: &StructuralEvaluator<'_, Record>,
-    ) -> Result<Option<String>, DecodeError> {
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
+    ) -> Result<Option<String>, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         self.skip_trivia(evaluator)?;
         let Some(matched) = self.local_match(evaluator)? else {
             return Ok(None);
@@ -440,11 +400,14 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         ))
     }
 
-    fn take_boundary<Record: StructureRecord>(
+    fn take_boundary<Root, Record: StructureRecord<Root>>(
         &mut self,
-        evaluator: &StructuralEvaluator<'_, Record>,
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
         boundary: TriggerIdentifier,
-    ) -> Result<Self, DecodeError> {
+    ) -> Result<Self, DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         self.skip_trivia(evaluator)?;
         let child = self
             .next_child_at_cursor()
@@ -468,11 +431,14 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         })
     }
 
-    fn consume_operator<Record: StructureRecord>(
+    fn consume_operator<Root, Record: StructureRecord<Root>>(
         &mut self,
-        evaluator: &StructuralEvaluator<'_, Record>,
+        evaluator: &StructuralEvaluator<'_, Root, Record>,
         identifier: TriggerIdentifier,
-    ) -> Result<(), DecodeError> {
+    ) -> Result<(), DecodeError<Root>>
+    where
+        Root: Clone + Ord,
+    {
         let (Trigger::Application { glyph } | Trigger::Punctuation { glyph }) =
             &evaluator.profile.definition(identifier)?.trigger
         else {
@@ -499,97 +465,67 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
 /// The trusted textual evaluator. Pass one owns recursive boundary discovery;
 /// this evaluator owns the single typed traversal of records, roles, products,
 /// sums, delegation, and repetition over the resulting bounded cursor.
-pub struct StructuralEvaluator<'table, Record = StructuralRule> {
-    pub(crate) table: &'table AddressedStructuralTable<Record>,
+pub struct StructuralEvaluator<'table, Root, Record = StructuralRule<Root>> {
+    pub(crate) table: &'table AddressedStructuralTable<Root, Record>,
     pub(crate) profile: &'table SealedTokenProfile,
-    pub(crate) lexicon: Option<&'table NameTable>,
 }
 
-impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
+impl<'table, Root, Record> StructuralEvaluator<'table, Root, Record>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
     /// Construct the table-owned evaluator used by `Textual`.
-    pub fn new(table: &'table AddressedStructuralTable<Record>) -> Result<Self, DecodeError> {
+    pub fn new(
+        table: &'table AddressedStructuralTable<Root, Record>,
+    ) -> Result<Self, DecodeError<Root>> {
         Ok(Self {
             table,
             profile: table.token_profile(),
-            lexicon: None,
         })
-    }
-
-    /// Construct the table-owned evaluator with literal resolution data.
-    pub fn with_lexicon(
-        table: &'table AddressedStructuralTable<Record>,
-        lexicon: &'table NameTable,
-    ) -> Result<Self, DecodeError> {
-        let mut evaluator = Self::new(table)?;
-        evaluator.lexicon = Some(lexicon);
-        Ok(evaluator)
     }
 
     /// Compatibility constructor that verifies a supplied profile is the
     /// table-owned profile. It does not restore a raw-`Block` evaluation path.
     pub fn with_profile(
-        table: &'table AddressedStructuralTable<Record>,
+        table: &'table AddressedStructuralTable<Root, Record>,
         profile: &'table SealedTokenProfile,
-    ) -> Result<Self, DecodeError> {
+    ) -> Result<Self, DecodeError<Root>> {
         if table.token_profile_identity() != profile.identity() {
             return Err(DecodeError::TokenProfileIdentityMismatch);
         }
         Self::new(table)
     }
 
-    /// Compatibility constructor with literal data; textual traversal remains
-    /// table/profile-owned.
-    pub fn with_profile_and_lexicon(
-        table: &'table AddressedStructuralTable<Record>,
-        profile: &'table SealedTokenProfile,
-        lexicon: &'table NameTable,
-    ) -> Result<Self, DecodeError> {
-        if table.token_profile_identity() != profile.identity() {
-            return Err(DecodeError::TokenProfileIdentityMismatch);
-        }
-        Self::with_lexicon(table, lexicon)
-    }
-
     /// Decode only after raw-discovery has constructed the whole block tree.
-    pub fn decode_text(
+    pub fn decode_text<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
-        expected: ScopedEncodedTypeId,
+        expected: &EncodedTypeId<Root>,
         source: &str,
-        names: &mut NameTable,
-    ) -> Result<StructuralValue, DecodeError> {
-        names
-            .try_intern(|transaction| self.decode_text_with_interner(expected, source, transaction))
+        bindings: &Bindings,
+    ) -> Result<StructuralValue<Root>, DecodeError<Root>> {
+        self.decode_text_to_draft(expected, source, bindings)
+            .map(DraftStructuralValue::materialize_value)
     }
 
-    pub fn decode_text_with_interner(
+    /// Decode with the exact full-source bound consumed by every typed field
+    /// in the selected top-level record.
+    pub fn decode_text_bounded<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
-        expected: ScopedEncodedTypeId,
+        expected: &EncodedTypeId<Root>,
         source: &str,
-        interner: &mut impl NameInterner,
-    ) -> Result<StructuralValue, DecodeError> {
-        let (value, drafts) = self.decode_text_to_draft(expected, source)?;
-        drafts.materialize(value, interner)
+        bindings: &Bindings,
+    ) -> Result<SourceBoundedStructuralValue<Root>, DecodeError<Root>> {
+        self.decode_text_to_draft(expected, source, bindings)
+            .map(DraftStructuralValue::materialize_bounded)
     }
 
-    /// Exercise the same discovery and typed decode route while retaining
-    /// candidate-local names. The test-only hook makes recursive progress
-    /// observable independently from materializing the role-keyed mirror.
-    #[cfg(test)]
-    pub(crate) fn decode_text_without_materializing(
+    fn decode_text_to_draft<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
-        expected: ScopedEncodedTypeId,
+        expected: &EncodedTypeId<Root>,
         source: &str,
-    ) -> Result<(), DecodeError> {
-        self.decode_text_to_draft(expected, source).map(|_| ())
-    }
-
-    fn decode_text_to_draft(
-        &self,
-        expected: ScopedEncodedTypeId,
-        source: &str,
-    ) -> Result<(DraftStructuralValue, DraftNames), DecodeError> {
-        #[cfg(test)]
-        CURSOR_CHILD_INDEX_PROBES.with(|probes| probes.set(0));
+        bindings: &Bindings,
+    ) -> Result<DraftStructuralValue<Root>, DecodeError<Root>> {
         let tree =
             DiscoveredBlockTree::discover(source, self.profile, self.table.block_discovery())?;
         let mut cursor =
@@ -598,36 +534,41 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         if cursor.position == cursor.bound.end() {
             return Err(DecodeError::RootObjectCount);
         }
-        let mut drafts = DraftNames::default();
         let value = self.decode_type(
             expected,
             &mut cursor,
-            &mut drafts,
+            bindings,
             &[],
             DecodeContinuation::Bound,
         )?;
         if !cursor.finish(self)? {
             return Err(DecodeError::RootObjectCount);
         }
-        Ok((value, drafts))
+        Ok(value)
     }
 
-    fn decode_type(
+    fn decode_type<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
-        expected: ScopedEncodedTypeId,
+        expected: &EncodedTypeId<Root>,
         input: &mut BoundedCursor<'_, '_>,
-        drafts: &mut DraftNames,
-        active: &[DecodeProgressKey],
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
         continuation: DecodeContinuation<'_>,
-    ) -> Result<DraftStructuralValue, DecodeError> {
+    ) -> Result<DraftStructuralValue<Root>, DecodeError<Root>> {
         let progress = DecodeProgressKey::at(expected, input, continuation);
         if active.contains(&progress) {
-            return Err(DecodeError::DelegationCycle(expected));
+            return Err(DecodeError::DelegationCycle(expected.clone()));
         }
         let entry = self
             .table
             .entry(expected)
-            .ok_or(DecodeError::UnknownType(expected))?;
+            .ok_or_else(|| DecodeError::UnknownType(expected.clone()))?;
+        let single_decode_form = entry
+            .constructors()
+            .iter()
+            .map(|codec| codec.decode_forms().len())
+            .sum::<usize>()
+            == 1;
         let structural_stops = self.alternative_operators(entry)?;
         let scope = DecodeScope {
             continuation,
@@ -638,33 +579,36 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         for codec in entry.constructors() {
             for accepted in codec.decode_forms() {
                 let mut candidate = input.clone();
-                let mut candidate_drafts = drafts.clone();
                 let mut state = Self::state_for(accepted.rule());
                 let root = accepted.rule().root_role();
                 match self.decode_role(
                     root,
                     &mut candidate,
                     &mut state,
-                    &mut candidate_drafts,
+                    bindings,
                     &next_active,
                     scope,
                 ) {
                     Ok(_) if candidate.completes(self, continuation)? => {
                         *input = candidate;
-                        *drafts = candidate_drafts;
                         return Ok(DraftStructuralValue {
-                            constructor: codec.constructor(),
+                            constructor: codec.constructor().clone(),
                             fields: state.fields,
+                            field_bounds: state.field_bounds,
                         });
                     }
                     Ok(_) => {}
+                    Err(
+                        error @ (DecodeError::ProductArityMismatch { .. }
+                        | DecodeError::ProductPositionMismatch { .. }),
+                    ) if single_decode_form => return Err(error),
                     Err(error) if error.is_structural_non_match() => {}
                     Err(error) => return Err(error),
                 }
             }
         }
         Err(DecodeError::NoAlternative {
-            core_type: expected,
+            core_type: expected.clone(),
         })
     }
 
@@ -674,8 +618,8 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
     /// bounded cursor stop, never as a choice priority.
     fn alternative_operators(
         &self,
-        entry: &StructuralEntry<Record>,
-    ) -> Result<Vec<String>, DecodeError> {
+        entry: &StructuralEntry<Root, Record>,
+    ) -> Result<Vec<String>, DecodeError<Root>> {
         let mut operators = BTreeSet::new();
         for codec in entry.constructors() {
             for accepted in codec.decode_forms() {
@@ -689,44 +633,49 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         Ok(operators.into_iter().collect())
     }
 
-    fn state_for(rule: &Record) -> DecodeState {
+    fn state_for(rule: &Record) -> DecodeState<Root> {
         let mut collector = DescriptorCollector {
             fields: BTreeMap::new(),
         };
         rule.fields().expose(&mut collector);
         DecodeState {
             fields: BTreeMap::new(),
+            field_bounds: BTreeMap::new(),
             roles: collector.fields,
         }
     }
 
-    fn decode_role(
+    fn decode_role<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
         role: StableRoleId,
         input: &mut BoundedCursor<'_, '_>,
-        state: &mut DecodeState,
-        drafts: &mut DraftNames,
-        active: &[DecodeProgressKey],
+        state: &mut DecodeState<Root>,
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
-    ) -> Result<DraftFieldValue, DecodeError> {
+    ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
+        input.skip_trivia(self)?;
+        let start = input.position;
         let descriptor = state.descriptor(role)?.clone();
-        let value = self.decode_descriptor(&descriptor, input, state, drafts, active, scope)?;
+        let value = self.decode_descriptor(&descriptor, input, state, bindings, active, scope)?;
+        let bound = SourceBound::checked(input.source, start, input.position)?;
         state.fields.insert(role, value.clone());
+        state.field_bounds.insert(role, bound);
         Ok(value)
     }
 
-    fn decode_descriptor(
+    fn decode_descriptor<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
-        descriptor: &SharedDescriptor,
+        descriptor: &SharedDescriptor<Root>,
         input: &mut BoundedCursor<'_, '_>,
-        state: &mut DecodeState,
-        drafts: &mut DraftNames,
-        active: &[DecodeProgressKey],
+        state: &mut DecodeState<Root>,
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
-    ) -> Result<DraftFieldValue, DecodeError> {
+    ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
         match descriptor {
-            SharedDescriptor::Atom(form) => {
-                let atom = self.take_source_atom(
+            SharedDescriptor::Declaration(form) => {
+                let (atom, bound) = self.take_source_atom(
                     input,
                     scope.continuation.terminator(),
                     scope.structural_stops,
@@ -734,21 +683,42 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                Ok(DraftFieldValue::Atom(DraftAtom::Interned(
-                    drafts.intern(Name::new(atom.text())),
-                )))
+                let assignment = bindings
+                    .declaration_assignment(NameOccurrence::new(atom.text(), bound))
+                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
+                self.verify_bound_spelling(bindings, assignment.encoded_id(), atom.text(), bound)?;
+                Ok(DraftFieldValue::Declaration(assignment))
             }
-            SharedDescriptor::Literal(identifier) => {
-                let atom = self.take_source_atom(
+            SharedDescriptor::Reference(form) => {
+                let (atom, bound) = self.take_source_atom(
                     input,
                     scope.continuation.terminator(),
                     scope.structural_stops,
                 )?;
-                let lexicon = self.lexicon.ok_or(DecodeError::MissingLexicon)?;
-                if lexicon.resolve(*identifier)?.as_str() != atom.text() {
+                if !form.accepts(&atom) {
+                    return Err(DecodeError::CaseMismatch);
+                }
+                let reference = bindings
+                    .reference_resolution(NameOccurrence::new(atom.text(), bound))
+                    .ok_or(DecodeError::UnresolvedReference { bound })?;
+                self.verify_bound_spelling(bindings, reference.encoded_id(), atom.text(), bound)?;
+                Ok(DraftFieldValue::Reference(reference))
+            }
+            SharedDescriptor::Literal(identifier) => {
+                let (atom, _) = self.take_source_atom(
+                    input,
+                    scope.continuation.terminator(),
+                    scope.structural_stops,
+                )?;
+                let spelling = bindings.resolve(identifier).ok_or_else(|| {
+                    DecodeError::UnknownEncodedName {
+                        encoded_id: identifier.clone(),
+                    }
+                })?;
+                if spelling.as_str() != atom.text() {
                     return Err(DecodeError::LiteralMismatch);
                 }
-                Ok(DraftFieldValue::Atom(DraftAtom::Literal(*identifier)))
+                Ok(DraftFieldValue::Literal(identifier.clone()))
             }
             SharedDescriptor::Leaf(codec) => Ok(DraftFieldValue::Scalar(self.decode_leaf(
                 codec,
@@ -759,7 +729,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             SharedDescriptor::Delegate { target, payload } => {
                 if let Some(payload) = payload {
                     let mut preview = input.clone();
-                    let atom = self
+                    let (atom, _) = self
                         .take_source_atom(
                             &mut preview,
                             scope.continuation.terminator(),
@@ -773,12 +743,16 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                     }
                 }
                 Ok(DraftFieldValue::Delegated(Rc::new(self.decode_type(
-                    *target,
+                    target,
                     input,
-                    drafts,
+                    bindings,
                     active,
                     scope.continuation,
                 )?)))
+            }
+            SharedDescriptor::OrderedProduct(product) => {
+                self.decode_ordered_product(product, input, state, bindings, active)?;
+                Ok(DraftFieldValue::OrderedProduct)
             }
             SharedDescriptor::Application {
                 operator,
@@ -790,7 +764,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                     *head,
                     input,
                     state,
-                    drafts,
+                    bindings,
                     active,
                     DecodeScope {
                         continuation: DecodeContinuation::Before(&operator_text),
@@ -798,7 +772,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                     },
                 )?;
                 input.consume_operator(self, *operator)?;
-                let payload = self.decode_role(*payload, input, state, drafts, active, scope)?;
+                let payload = self.decode_role(*payload, input, state, bindings, active, scope)?;
                 Ok(DraftFieldValue::Application {
                     head: Rc::new(head),
                     payload: Rc::new(payload),
@@ -808,7 +782,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             | SharedDescriptor::ItemBoundary { boundary, content } => {
                 let mut interior = input.take_boundary(self, *boundary)?;
                 let value =
-                    self.decode_repeated_role(*content, &mut interior, state, drafts, active)?;
+                    self.decode_repeated_role(*content, &mut interior, state, bindings, active)?;
                 if !interior.finish(self)? {
                     return Err(DecodeError::RepetitionCardinality { found: 0 });
                 }
@@ -821,14 +795,82 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         }
     }
 
-    fn decode_repeated_role(
+    fn decode_ordered_product<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        product: &crate::form::OrderedProduct,
+        input: &mut BoundedCursor<'_, '_>,
+        state: &mut DecodeState<Root>,
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
+    ) -> Result<(), DecodeError<Root>> {
+        input.skip_trivia(self)?;
+        let found = input.children.len().saturating_sub(input.child_index);
+        if found != product.len() {
+            return Err(DecodeError::ProductArityMismatch {
+                expected: product.len(),
+                found,
+            });
+        }
+
+        for (position, role) in product.members().iter().copied().enumerate() {
+            input.skip_trivia(self)?;
+            let Some(child) = input.next_child_at_cursor() else {
+                let bound = SourceBound::checked(input.source, input.position, input.position)?;
+                return Err(DecodeError::ProductPositionMismatch {
+                    position,
+                    role,
+                    bound,
+                });
+            };
+            let bound = child.source_bound();
+            let child_index = input.child_index;
+            let decoded = self.decode_role(
+                role,
+                input,
+                state,
+                bindings,
+                active,
+                DecodeScope {
+                    continuation: DecodeContinuation::Repeated,
+                    structural_stops: &[],
+                },
+            );
+            match decoded {
+                Ok(_) if input.child_index == child_index + 1 && input.position == bound.end() => {}
+                Ok(_)
+                | Err(
+                    DecodeError::BlockKindMismatch { .. }
+                    | DecodeError::CaseMismatch
+                    | DecodeError::LiteralMismatch
+                    | DecodeError::DelegationPayloadMismatch { .. }
+                    | DecodeError::RepetitionCardinality { .. }
+                    | DecodeError::LeafNotFlattenable
+                    | DecodeError::ScalarParse(_)
+                    | DecodeError::BoundaryMismatch { .. }
+                    | DecodeError::ProductArityMismatch { .. }
+                    | DecodeError::ProductPositionMismatch { .. }
+                    | DecodeError::NoAlternative { .. },
+                ) => {
+                    return Err(DecodeError::ProductPositionMismatch {
+                        position,
+                        role,
+                        bound,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_repeated_role<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
         role: StableRoleId,
         input: &mut BoundedCursor<'_, '_>,
-        state: &mut DecodeState,
-        drafts: &mut DraftNames,
-        active: &[DecodeProgressKey],
-    ) -> Result<DraftFieldValue, DecodeError> {
+        state: &mut DecodeState<Root>,
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
+    ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
         let descriptor = state.descriptor(role)?.clone();
         let SharedDescriptor::Repeated {
             minimum,
@@ -838,6 +880,8 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         else {
             return Err(DecodeError::MissingRole { role });
         };
+        input.skip_trivia(self)?;
+        let start = input.position;
         let mut values = Vec::new();
         // This loop is the sole owner of separator trivia between repeated
         // elements.  `DecodeContinuation::Repeated` only observes the cue,
@@ -849,7 +893,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                 &element,
                 input,
                 state,
-                drafts,
+                bindings,
                 active,
                 DecodeScope {
                     continuation: DecodeContinuation::Repeated,
@@ -865,7 +909,9 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
             return Err(DecodeError::RepetitionCardinality { found });
         }
         let value = DraftFieldValue::Repeated(values);
+        let bound = SourceBound::checked(input.source, start, input.position)?;
         state.fields.insert(role, value.clone());
+        state.field_bounds.insert(role, bound);
         Ok(value)
     }
 
@@ -874,7 +920,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         input: &mut BoundedCursor<'_, '_>,
         terminator: Option<&str>,
         structural_stops: &[String],
-    ) -> Result<Atom, DecodeError> {
+    ) -> Result<(Atom, SourceBound), DecodeError<Root>> {
         let bound = input.take_bare(self, terminator, structural_stops)?;
         let text = input.text(bound);
         if text.contains('.') {
@@ -883,7 +929,26 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                 found: "dotted source",
             });
         }
-        Ok(Atom::new(text))
+        Ok((Atom::new(text), bound))
+    }
+
+    fn verify_bound_spelling(
+        &self,
+        resolver: &(impl EncodedNameResolver<Root> + ?Sized),
+        encoded_id: &name_table::EncodedId<Root>,
+        source_spelling: &str,
+        bound: SourceBound,
+    ) -> Result<(), DecodeError<Root>> {
+        let resolved =
+            resolver
+                .resolve(encoded_id)
+                .ok_or_else(|| DecodeError::UnknownEncodedName {
+                    encoded_id: encoded_id.clone(),
+                })?;
+        if resolved.as_str() != source_spelling {
+            return Err(DecodeError::NameBindingMismatch { bound });
+        }
+        Ok(())
     }
 
     fn decode_leaf(
@@ -892,7 +957,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         input: &mut BoundedCursor<'_, '_>,
         terminator: Option<&str>,
         structural_stops: &[String],
-    ) -> Result<ScalarValue, DecodeError> {
+    ) -> Result<ScalarValue, DecodeError<Root>> {
         let mut carrier = input.clone();
         if let Some(body) = carrier.take_carrier(self)? {
             *input = carrier;
@@ -939,12 +1004,12 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
 
     /// Render directly from descriptor data under explicit table-owned context
     /// policy. No raw `Block` renderer participates in textual output.
-    pub fn encode_text<Resolver: NameResolver + ?Sized>(
+    pub fn encode_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
-        expected: ScopedEncodedTypeId,
-        value: &StructuralValue,
+        expected: &EncodedTypeId<Root>,
+        value: &StructuralValue<Root>,
         resolver: &Resolver,
-    ) -> Result<String, EncodeError> {
+    ) -> Result<String, EncodeError<Root>> {
         self.encode_type_at_context(
             expected,
             value,
@@ -956,23 +1021,23 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
     /// The internal encoder carries the current recursive discovery context.
     /// Only the public entry point selects root; recursive descriptor arms
     /// retain or transition this context explicitly.
-    fn encode_type_at_context<Resolver: NameResolver + ?Sized>(
+    fn encode_type_at_context<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
-        expected: ScopedEncodedTypeId,
-        value: &StructuralValue,
+        expected: &EncodedTypeId<Root>,
+        value: &StructuralValue<Root>,
         resolver: &Resolver,
         context: BoundaryDiscoveryContextIdentifier,
-    ) -> Result<String, EncodeError> {
+    ) -> Result<String, EncodeError<Root>> {
         let entry = self
             .table
             .entry(expected)
-            .ok_or(EncodeError::UnknownType(expected))?;
+            .ok_or_else(|| EncodeError::UnknownType(expected.clone()))?;
         let codec = entry
             .constructors()
             .iter()
             .find(|codec| codec.constructor() == value.constructor())
             .ok_or(EncodeError::UnknownConstructor {
-                chosen: value.constructor(),
+                chosen: value.constructor().clone(),
             })?;
         let mut collector = DescriptorCollector {
             fields: BTreeMap::new(),
@@ -987,14 +1052,14 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         )
     }
 
-    fn encode_role<Resolver: NameResolver + ?Sized>(
+    fn encode_role<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
         role: StableRoleId,
-        descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
-        mirror: &RoleKeyedMirror,
+        descriptors: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+        mirror: &RoleKeyedMirror<Root>,
         resolver: &Resolver,
         context: BoundaryDiscoveryContextIdentifier,
-    ) -> Result<String, EncodeError> {
+    ) -> Result<String, EncodeError<Root>> {
         let descriptor = descriptors
             .get(&role)
             .ok_or(EncodeError::MissingRole { role })?;
@@ -1004,32 +1069,35 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         self.encode_descriptor(descriptor, value, descriptors, mirror, resolver, context)
     }
 
-    fn encode_descriptor<Resolver: NameResolver + ?Sized>(
+    fn encode_descriptor<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
-        descriptor: &SharedDescriptor,
-        value: &FieldValue,
-        descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
-        mirror: &RoleKeyedMirror,
+        descriptor: &SharedDescriptor<Root>,
+        value: &FieldValue<Root>,
+        descriptors: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+        mirror: &RoleKeyedMirror<Root>,
         resolver: &Resolver,
         context: BoundaryDiscoveryContextIdentifier,
-    ) -> Result<String, EncodeError> {
+    ) -> Result<String, EncodeError<Root>> {
         match (descriptor, value) {
-            (SharedDescriptor::Atom(_), FieldValue::Atom(identifier)) => {
-                Ok(resolver.resolve(*identifier)?.as_str().to_owned())
+            (SharedDescriptor::Declaration(_), FieldValue::Declaration(assignment)) => {
+                Self::resolve_text(resolver, assignment.encoded_id())
             }
-            (SharedDescriptor::Literal(expected), FieldValue::Atom(identifier))
+            (SharedDescriptor::Reference(_), FieldValue::Reference(reference)) => {
+                Self::resolve_text(resolver, reference.encoded_id())
+            }
+            (SharedDescriptor::Literal(expected), FieldValue::Literal(identifier))
                 if expected == identifier =>
             {
-                Ok(resolver.resolve(*identifier)?.as_str().to_owned())
+                Self::resolve_text(resolver, identifier)
             }
-            (SharedDescriptor::Literal(_), FieldValue::Atom(_)) => {
+            (SharedDescriptor::Literal(_), FieldValue::Literal(_)) => {
                 Err(EncodeError::LiteralMismatch)
             }
             (SharedDescriptor::Leaf(codec), FieldValue::Scalar(value)) => {
                 self.encode_leaf(codec, value, context)
             }
             (SharedDescriptor::Delegate { target, payload }, FieldValue::Delegated(value)) => {
-                let text = self.encode_type_at_context(*target, value, resolver, context)?;
+                let text = self.encode_type_at_context(target, value, resolver, context)?;
                 if let Some(payload) = payload {
                     let atom = Atom::new(&text);
                     if text.contains('.') || !payload.accepts(&atom) {
@@ -1037,6 +1105,14 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                     }
                 }
                 Ok(text)
+            }
+            (SharedDescriptor::OrderedProduct(product), FieldValue::OrderedProduct) => {
+                let rendered = product
+                    .members()
+                    .iter()
+                    .map(|role| self.encode_role(*role, descriptors, mirror, resolver, context))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.join_product_members(rendered, context)
             }
             (
                 SharedDescriptor::Application {
@@ -1091,14 +1167,38 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         }
     }
 
-    fn encode_repeated_role<Resolver: NameResolver + ?Sized>(
+    fn join_product_members(
+        &self,
+        rendered: Vec<String>,
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError<Root>> {
+        if rendered.len() < 2 {
+            return Ok(rendered.concat());
+        }
+        let policy = self
+            .table
+            .textual_rendering()
+            .for_context(context)
+            .ok_or(EncodeError::NonCanonicalSpelling)?;
+        let separator = policy
+            .separator()
+            .ok_or(EncodeError::NonCanonicalSpelling)?;
+        let Trigger::Whitespace { canonical_spelling } =
+            &self.profile.definition(separator)?.trigger
+        else {
+            return Err(EncodeError::NonCanonicalSpelling);
+        };
+        Ok(rendered.join(canonical_spelling))
+    }
+
+    fn encode_repeated_role<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
         role: StableRoleId,
-        descriptors: &BTreeMap<StableRoleId, SharedDescriptor>,
-        mirror: &RoleKeyedMirror,
+        descriptors: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+        mirror: &RoleKeyedMirror<Root>,
         resolver: &Resolver,
         context: BoundaryDiscoveryContextIdentifier,
-    ) -> Result<String, EncodeError> {
+    ) -> Result<String, EncodeError<Root>> {
         let SharedDescriptor::Repeated { element, .. } = descriptors
             .get(&role)
             .ok_or(EncodeError::MissingRole { role })?
@@ -1136,12 +1236,24 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         Ok(rendered.join(canonical_spelling))
     }
 
+    fn resolve_text(
+        resolver: &(impl EncodedNameResolver<Root> + ?Sized),
+        encoded_id: &name_table::EncodedId<Root>,
+    ) -> Result<String, EncodeError<Root>> {
+        resolver
+            .resolve(encoded_id)
+            .map(|name| name.as_str().to_owned())
+            .ok_or_else(|| EncodeError::UnknownEncodedName {
+                encoded_id: encoded_id.clone(),
+            })
+    }
+
     fn encode_leaf(
         &self,
         codec: &LeafCodec,
         value: &ScalarValue,
         context: BoundaryDiscoveryContextIdentifier,
-    ) -> Result<String, EncodeError> {
+    ) -> Result<String, EncodeError<Root>> {
         match (codec, value) {
             (LeafCodec::Integer, ScalarValue::Integer(value)) => Ok(value.to_string()),
             (LeafCodec::Float, ScalarValue::Float(value)) => Ok(value.to_string()),
@@ -1160,7 +1272,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         &self,
         body: &str,
         context: BoundaryDiscoveryContextIdentifier,
-    ) -> Result<String, EncodeError> {
+    ) -> Result<String, EncodeError<Root>> {
         let policy = self
             .table
             .textual_rendering()
@@ -1189,7 +1301,7 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
                 .all(|part| Atom::new(part).qualifies_as_symbol())
     }
 
-    fn operator_text(&self, identifier: TriggerIdentifier) -> Result<String, DecodeError> {
+    fn operator_text(&self, identifier: TriggerIdentifier) -> Result<String, DecodeError<Root>> {
         match &self.profile.definition(identifier)?.trigger {
             Trigger::Application { glyph } | Trigger::Punctuation { glyph } => Ok(glyph.clone()),
             _ => Err(DecodeError::BlockKindMismatch {
@@ -1199,7 +1311,10 @@ impl<'table, Record: StructureRecord> StructuralEvaluator<'table, Record> {
         }
     }
 
-    fn operator_text_encode(&self, identifier: TriggerIdentifier) -> Result<&str, EncodeError> {
+    fn operator_text_encode(
+        &self,
+        identifier: TriggerIdentifier,
+    ) -> Result<&str, EncodeError<Root>> {
         match &self.profile.definition(identifier)?.trigger {
             Trigger::Application { glyph } | Trigger::Punctuation { glyph } => Ok(glyph),
             _ => Err(EncodeError::ShapeMismatch),

@@ -1,9 +1,4 @@
 //! Conservative disjointness proof over shared descriptors and typed positions.
-//!
-//! The proof is deliberately stricter than the evaluator: an alternative pair
-//! seals only when a structural distinction is proved. In particular, delegate
-//! payload constraints participate in the proof and an active delegate
-//! expansion is a typed cycle failure, never a missing target.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,22 +8,22 @@ use crate::form::{
     AtomDescriptor, BorrowedFieldView, DelegationPayload, FieldVisitor, Position, SharedDescriptor,
     StructureRecord,
 };
-use crate::ids::{FieldRole, ScopedEncodedTypeId, StableRoleId};
+use crate::ids::{EncodedTypeId, FieldRole, StableRoleId};
 
-struct Collector {
-    fields: BTreeMap<StableRoleId, SharedDescriptor>,
+struct Collector<Root> {
+    fields: BTreeMap<StableRoleId, SharedDescriptor<Root>>,
 }
 
-impl FieldVisitor for Collector {
-    fn field<Role: FieldRole>(&mut self, position: &Position<Role>) {
+impl<Root: Clone> FieldVisitor<Root> for Collector<Root> {
+    fn field<Role: FieldRole>(&mut self, position: &Position<Role, Root>) {
         self.fields
             .insert(position.role(), position.descriptor().clone());
     }
 }
 
-fn fields<Record: StructureRecord>(
+fn fields<Root: Clone, Record: StructureRecord<Root>>(
     rule: &Record,
-) -> (StableRoleId, BTreeMap<StableRoleId, SharedDescriptor>) {
+) -> (StableRoleId, BTreeMap<StableRoleId, SharedDescriptor<Root>>) {
     let mut collector = Collector {
         fields: BTreeMap::new(),
     };
@@ -36,32 +31,34 @@ fn fields<Record: StructureRecord>(
     (rule.root_role(), collector.fields)
 }
 
-enum Outer<'a> {
-    Atom(Option<raw_discovery::AtomCase>),
-    Literal(name_table::Identifier),
-    Application(&'a SharedDescriptor, &'a SharedDescriptor),
+enum Outer<'a, Root> {
+    Named(Option<raw_discovery::AtomCase>),
+    Literal(&'a name_table::EncodedId<Root>),
+    Application(&'a SharedDescriptor<Root>, &'a SharedDescriptor<Root>),
     Boundary(raw_discovery::TriggerIdentifier),
     Opaque,
 }
 
-enum ProofFailure {
-    Reason(DisjointnessReason),
-    Cycle(ScopedEncodedTypeId),
+enum ProofFailure<Root> {
+    Reason(DisjointnessReason<Root>),
+    Cycle(EncodedTypeId<Root>),
 }
 
-type ProofResult = Result<(), ProofFailure>;
+type ProofResult<Root> = Result<(), ProofFailure<Root>>;
 
-fn reason<T>(reason: DisjointnessReason) -> Result<T, ProofFailure> {
+fn reason<Root, T>(reason: DisjointnessReason<Root>) -> Result<T, ProofFailure<Root>> {
     Err(ProofFailure::Reason(reason))
 }
 
-fn outer<'a>(
-    descriptor: &'a SharedDescriptor,
-    roles: &'a BTreeMap<StableRoleId, SharedDescriptor>,
-) -> Result<Outer<'a>, ProofFailure> {
+fn outer<'a, Root>(
+    descriptor: &'a SharedDescriptor<Root>,
+    roles: &'a BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+) -> Result<Outer<'a, Root>, ProofFailure<Root>> {
     match descriptor {
-        SharedDescriptor::Atom(atom) => Ok(Outer::Atom(atom.case)),
-        SharedDescriptor::Literal(identifier) => Ok(Outer::Literal(*identifier)),
+        SharedDescriptor::Declaration(atom) | SharedDescriptor::Reference(atom) => {
+            Ok(Outer::Named(atom.case))
+        }
+        SharedDescriptor::Literal(identifier) => Ok(Outer::Literal(identifier)),
         SharedDescriptor::Application { head, payload, .. } => {
             Ok(Outer::Application(
                 roles
@@ -76,27 +73,33 @@ fn outer<'a>(
         }
         SharedDescriptor::Delimited { boundary, .. }
         | SharedDescriptor::ItemBoundary { boundary, .. } => Ok(Outer::Boundary(*boundary)),
-        SharedDescriptor::Leaf(_) | SharedDescriptor::Repeated { .. } => Ok(Outer::Opaque),
+        SharedDescriptor::Leaf(_)
+        | SharedDescriptor::Repeated { .. }
+        | SharedDescriptor::OrderedProduct(_) => Ok(Outer::Opaque),
         SharedDescriptor::Delegate { .. } => unreachable!("delegates expand before outer proof"),
     }
 }
 
-impl<Record: StructureRecord> StructuralEntry<Record> {
-    pub fn validate_disjoint(&self) -> Result<(), DisjointnessError> {
+impl<Root, Record> StructuralEntry<Root, Record>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
+    pub fn validate_disjoint(&self) -> Result<(), DisjointnessError<Root>> {
         self.validate_disjoint_against(None)
     }
 
     pub(crate) fn validate_disjoint_with(
         &self,
-        entries: &BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>,
-    ) -> Result<(), DisjointnessError> {
+        entries: &[StructuralEntry<Root, Record>],
+    ) -> Result<(), DisjointnessError<Root>> {
         self.validate_disjoint_against(Some(entries))
     }
 
     fn validate_disjoint_against(
         &self,
-        entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
-    ) -> Result<(), DisjointnessError> {
+        entries: Option<&[StructuralEntry<Root, Record>]>,
+    ) -> Result<(), DisjointnessError<Root>> {
         let alternatives = self
             .constructors()
             .iter()
@@ -117,15 +120,15 @@ impl<Record: StructureRecord> StructuralEntry<Record> {
                     Ok(()) => {}
                     Err(ProofFailure::Reason(reason)) => {
                         return Err(DisjointnessError::NotProvablyDisjoint {
-                            core_type: self.encoded_type(),
-                            first: *left_constructor,
-                            second: *right_constructor,
+                            core_type: self.encoded_type().clone(),
+                            first: (*left_constructor).clone(),
+                            second: (*right_constructor).clone(),
                             reason,
                         });
                     }
                     Err(ProofFailure::Cycle(reentered)) => {
                         return Err(DisjointnessError::DelegateExpansionCycle {
-                            core_type: self.encoded_type(),
+                            core_type: self.encoded_type().clone(),
                             reentered,
                         });
                     }
@@ -136,12 +139,16 @@ impl<Record: StructureRecord> StructuralEntry<Record> {
     }
 }
 
-fn prove_rules<Record: StructureRecord>(
+fn prove_rules<Root, Record>(
     left: &Record,
     right: &Record,
-    entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
-    active: &mut BTreeSet<ScopedEncodedTypeId>,
-) -> ProofResult {
+    entries: Option<&[StructuralEntry<Root, Record>]>,
+    active: &mut BTreeSet<EncodedTypeId<Root>>,
+) -> ProofResult<Root>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
     let (left_root, left_roles) = fields(left);
     let (right_root, right_roles) = fields(right);
     prove(
@@ -158,14 +165,18 @@ fn prove_rules<Record: StructureRecord>(
     )
 }
 
-fn prove<Record: StructureRecord>(
-    left: &SharedDescriptor,
-    left_roles: &BTreeMap<StableRoleId, SharedDescriptor>,
-    right: &SharedDescriptor,
-    right_roles: &BTreeMap<StableRoleId, SharedDescriptor>,
-    entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
-    active: &mut BTreeSet<ScopedEncodedTypeId>,
-) -> ProofResult {
+fn prove<Root, Record>(
+    left: &SharedDescriptor<Root>,
+    left_roles: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+    right: &SharedDescriptor<Root>,
+    right_roles: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+    entries: Option<&[StructuralEntry<Root, Record>]>,
+    active: &mut BTreeSet<EncodedTypeId<Root>>,
+) -> ProofResult<Root>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
     if let (
         SharedDescriptor::Delegate {
             payload: Some(left_payload),
@@ -185,29 +196,34 @@ fn prove<Record: StructureRecord>(
     }
 
     match (left, right) {
-        (SharedDescriptor::Delegate { target, payload }, _) => {
-            expand(*target, *payload, right, right_roles, entries, active)
-        }
+        (SharedDescriptor::Delegate { target, payload }, _) => expand(
+            target.clone(),
+            *payload,
+            right,
+            right_roles,
+            entries,
+            active,
+        ),
         (_, SharedDescriptor::Delegate { target, payload }) => {
-            expand(*target, *payload, left, left_roles, entries, active)
+            expand(target.clone(), *payload, left, left_roles, entries, active)
         }
         _ => match (outer(left, left_roles)?, outer(right, right_roles)?) {
             (Outer::Opaque, _) | (_, Outer::Opaque) => reason(DisjointnessReason::OpaqueForm),
-            (Outer::Atom(left), Outer::Atom(right)) => match (left, right) {
+            (Outer::Named(left), Outer::Named(right)) => match (left, right) {
                 (Some(left), Some(right)) if left != right => Ok(()),
                 _ => reason(DisjointnessReason::OverlappingAtomCase),
             },
             (Outer::Literal(left), Outer::Literal(right)) if left != right => Ok(()),
             (Outer::Literal(_), Outer::Literal(_)) => reason(DisjointnessReason::SameLiteral),
-            (Outer::Atom(_), Outer::Literal(_)) | (Outer::Literal(_), Outer::Atom(_)) => {
+            (Outer::Named(_), Outer::Literal(_)) | (Outer::Literal(_), Outer::Named(_)) => {
                 reason(DisjointnessReason::LiteralMayMatchNameAtom)
             }
-            (Outer::Application(_, _), Outer::Atom(_))
-            | (Outer::Atom(_), Outer::Application(_, _))
+            (Outer::Application(_, _), Outer::Named(_))
+            | (Outer::Named(_), Outer::Application(_, _))
             | (Outer::Application(_, _), Outer::Literal(_))
             | (Outer::Literal(_), Outer::Application(_, _))
-            | (Outer::Boundary(_), Outer::Atom(_))
-            | (Outer::Atom(_), Outer::Boundary(_))
+            | (Outer::Boundary(_), Outer::Named(_))
+            | (Outer::Named(_), Outer::Boundary(_))
             | (Outer::Boundary(_), Outer::Literal(_))
             | (Outer::Literal(_), Outer::Boundary(_))
             | (Outer::Application(_, _), Outer::Boundary(_))
@@ -217,38 +233,36 @@ fn prove<Record: StructureRecord>(
             (
                 Outer::Application(left_head, left_payload),
                 Outer::Application(right_head, right_payload),
-            ) => {
-                match prove(
-                    left_head,
+            ) => match prove(
+                left_head,
+                left_roles,
+                right_head,
+                right_roles,
+                entries,
+                active,
+            ) {
+                Ok(()) => Ok(()),
+                Err(ProofFailure::Cycle(reentered)) => Err(ProofFailure::Cycle(reentered)),
+                Err(ProofFailure::Reason(_)) => match prove(
+                    left_payload,
                     left_roles,
-                    right_head,
+                    right_payload,
                     right_roles,
                     entries,
                     active,
                 ) {
                     Ok(()) => Ok(()),
                     Err(ProofFailure::Cycle(reentered)) => Err(ProofFailure::Cycle(reentered)),
-                    Err(ProofFailure::Reason(_)) => match prove(
-                        left_payload,
-                        left_roles,
-                        right_payload,
-                        right_roles,
-                        entries,
-                        active,
-                    ) {
-                        Ok(()) => Ok(()),
-                        Err(ProofFailure::Cycle(reentered)) => Err(ProofFailure::Cycle(reentered)),
-                        Err(ProofFailure::Reason(_)) => {
-                            reason(DisjointnessReason::ApplicationPositionsNotDisjoint)
-                        }
-                    },
-                }
-            }
+                    Err(ProofFailure::Reason(_)) => {
+                        reason(DisjointnessReason::ApplicationPositionsNotDisjoint)
+                    }
+                },
+            },
         },
     }
 }
 
-fn prove_payloads(left: DelegationPayload, right: DelegationPayload) -> ProofResult {
+fn prove_payloads<Root>(left: DelegationPayload, right: DelegationPayload) -> ProofResult<Root> {
     match (left, right) {
         (DelegationPayload::AtomCase(left), DelegationPayload::AtomCase(right))
             if left != right =>
@@ -259,32 +273,43 @@ fn prove_payloads(left: DelegationPayload, right: DelegationPayload) -> ProofRes
     }
 }
 
-fn payload_descriptor(payload: DelegationPayload) -> SharedDescriptor {
+fn payload_descriptor<Root>(payload: DelegationPayload) -> SharedDescriptor<Root> {
     match payload {
         DelegationPayload::AtomCase(case) => {
-            SharedDescriptor::Atom(AtomDescriptor::with_case(case))
+            SharedDescriptor::Reference(AtomDescriptor::with_case(case))
         }
     }
 }
 
-fn expand<Record: StructureRecord>(
-    target: ScopedEncodedTypeId,
+fn expand<Root, Record>(
+    target: EncodedTypeId<Root>,
     payload: Option<DelegationPayload>,
-    other: &SharedDescriptor,
-    other_roles: &BTreeMap<StableRoleId, SharedDescriptor>,
-    entries: Option<&BTreeMap<ScopedEncodedTypeId, StructuralEntry<Record>>>,
-    active: &mut BTreeSet<ScopedEncodedTypeId>,
-) -> ProofResult {
-    let entries = entries.ok_or(ProofFailure::Reason(
-        DisjointnessReason::MissingDelegateTarget { target },
-    ))?;
-    if !active.insert(target) {
+    other: &SharedDescriptor<Root>,
+    other_roles: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+    entries: Option<&[StructuralEntry<Root, Record>]>,
+    active: &mut BTreeSet<EncodedTypeId<Root>>,
+) -> ProofResult<Root>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
+    let entries = entries.ok_or_else(|| {
+        ProofFailure::Reason(DisjointnessReason::MissingDelegateTarget {
+            target: target.clone(),
+        })
+    })?;
+    if !active.insert(target.clone()) {
         return Err(ProofFailure::Cycle(target));
     }
     let result = (|| {
-        let entry = entries.get(&target).ok_or(ProofFailure::Reason(
-            DisjointnessReason::MissingDelegateTarget { target },
-        ))?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.encoded_type() == &target)
+            .ok_or_else(|| {
+                ProofFailure::Reason(DisjointnessReason::MissingDelegateTarget {
+                    target: target.clone(),
+                })
+            })?;
         for codec in entry.constructors() {
             for accepted in codec.decode_forms() {
                 let (root, roles) = fields(accepted.rule());

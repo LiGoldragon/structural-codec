@@ -2,11 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use content_identity::{ArchiveError, ContentHash, DomainSeparation, HashDomain, LayoutVersion};
-use name_table::Identifier;
+use raw_discovery::SourceBound;
 
 use crate::error::AuthoringError;
 use crate::ids::{EncodedConstructorId, FieldRole, StableRoleId};
+use crate::names::{DeclarationAssignment, ResolvedReference};
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 #[rkyv(
@@ -14,37 +14,88 @@ use crate::ids::{EncodedConstructorId, FieldRole, StableRoleId};
     deserialize_bounds(__D::Error: rkyv::rancor::Source),
     bytecheck(bounds(__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::rancor::Source)),
 )]
-pub enum FieldValue {
-    Atom(Identifier),
+pub enum FieldValue<Root> {
+    Declaration(DeclarationAssignment<Root>),
+    Reference(ResolvedReference<Root>),
+    Literal(name_table::EncodedId<Root>),
     Scalar(ScalarValue),
-    Delimited(#[rkyv(omit_bounds)] Box<FieldValue>),
+    /// Marker for a fixed ordered product whose member values are stored under
+    /// their own typed roles in the enclosing mirror.
+    OrderedProduct,
+    Delimited(#[rkyv(omit_bounds)] Box<FieldValue<Root>>),
     Application {
         #[rkyv(omit_bounds)]
-        head: Box<FieldValue>,
+        head: Box<FieldValue<Root>>,
         #[rkyv(omit_bounds)]
-        payload: Box<FieldValue>,
+        payload: Box<FieldValue<Root>>,
     },
-    Delegated(#[rkyv(omit_bounds)] Box<StructuralValue>),
-    Repeated(#[rkyv(omit_bounds)] Vec<FieldValue>),
+    Delegated(#[rkyv(omit_bounds)] Box<StructuralValue<Root>>),
+    Repeated(#[rkyv(omit_bounds)] Vec<FieldValue<Root>>),
+}
+
+/// One decoded structural value with runtime-only source bounds keyed by the
+/// same typed roles as its fields.
+///
+/// Source bounds describe this decode and are never archived or used as
+/// durable identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceBoundedStructuralValue<Root> {
+    value: StructuralValue<Root>,
+    field_bounds: BTreeMap<StableRoleId, SourceBound>,
+}
+
+impl<Root> SourceBoundedStructuralValue<Root> {
+    pub(crate) fn new(
+        value: StructuralValue<Root>,
+        field_bounds: BTreeMap<StableRoleId, SourceBound>,
+    ) -> Self {
+        Self {
+            value,
+            field_bounds,
+        }
+    }
+
+    pub fn value(&self) -> &StructuralValue<Root> {
+        &self.value
+    }
+
+    pub fn into_value(self) -> StructuralValue<Root> {
+        self.value
+    }
+
+    /// The exact full-source bound consumed by one typed field.
+    pub fn field_bound<Role: FieldRole>(&self) -> Option<SourceBound> {
+        self.field_bounds
+            .get(&StableRoleId::for_role::<Role>())
+            .copied()
+    }
 }
 
 /// A generic mirror keyed by archived stable role ids, never by a fixed field
 /// index. Manual `Textual::reify`/`reflect` can name a compile-time role directly.
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct RoleKeyedMirror {
-    values: BTreeMap<StableRoleId, FieldValue>,
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
+pub struct RoleKeyedMirror<Root> {
+    values: BTreeMap<StableRoleId, FieldValue<Root>>,
 }
 
-impl RoleKeyedMirror {
-    pub(crate) fn insert(&mut self, role: StableRoleId, value: FieldValue) {
+impl<Root> Default for RoleKeyedMirror<Root> {
+    fn default() -> Self {
+        Self {
+            values: BTreeMap::new(),
+        }
+    }
+}
+
+impl<Root> RoleKeyedMirror<Root> {
+    pub(crate) fn insert(&mut self, role: StableRoleId, value: FieldValue<Root>) {
         self.values.insert(role, value);
     }
 
-    pub fn value<Role: FieldRole>(&self) -> Option<&FieldValue> {
+    pub fn value<Role: FieldRole>(&self) -> Option<&FieldValue<Root>> {
         self.values.get(&StableRoleId::for_role::<Role>())
     }
 
-    pub(crate) fn value_by_stable_role(&self, role: StableRoleId) -> Option<&FieldValue> {
+    pub(crate) fn value_by_stable_role(&self, role: StableRoleId) -> Option<&FieldValue<Root>> {
         self.values.get(&role)
     }
 }
@@ -53,15 +104,15 @@ impl RoleKeyedMirror {
 /// field-role can add a value, so external `Textual::reflect` code never
 /// writes a raw stable id or an untyped map entry.
 #[derive(Clone, Debug)]
-pub struct StructuralValueRecord {
-    constructor: EncodedConstructorId,
-    fields: RoleKeyedMirror,
+pub struct StructuralValueRecord<Root> {
+    constructor: EncodedConstructorId<Root>,
+    fields: RoleKeyedMirror<Root>,
 }
 
-impl StructuralValueRecord {
+impl<Root> StructuralValueRecord<Root> {
     pub fn insert<Role: FieldRole>(
         &mut self,
-        value: FieldValue,
+        value: FieldValue<Root>,
     ) -> Result<&mut Self, AuthoringError> {
         let role = StableRoleId::for_role::<Role>();
         if role.value() == 0 {
@@ -75,49 +126,48 @@ impl StructuralValueRecord {
     }
 
     /// Finish the checked, typed-role mirror for shared evaluation.
-    pub fn finish(self) -> StructuralValue {
+    pub fn finish(self) -> StructuralValue<Root> {
         StructuralValue::new(self.constructor, self.fields)
     }
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
-pub struct StructuralValue {
-    constructor: EncodedConstructorId,
-    fields: RoleKeyedMirror,
+pub struct StructuralValue<Root> {
+    constructor: EncodedConstructorId<Root>,
+    fields: RoleKeyedMirror<Root>,
 }
 
-impl StructuralValue {
+impl<Root> StructuralValue<Root> {
     /// Start a checked manual mirror for the selected constructor. Each field
     /// is added with [`StructuralValueRecord::insert`], whose role is a Rust
     /// type rather than an integer key.
-    pub fn record(constructor: EncodedConstructorId) -> StructuralValueRecord {
+    pub fn record(constructor: EncodedConstructorId<Root>) -> StructuralValueRecord<Root> {
         StructuralValueRecord {
             constructor,
             fields: RoleKeyedMirror::default(),
         }
     }
 
-    pub(crate) fn new(constructor: EncodedConstructorId, fields: RoleKeyedMirror) -> Self {
+    pub(crate) fn new(
+        constructor: EncodedConstructorId<Root>,
+        fields: RoleKeyedMirror<Root>,
+    ) -> Self {
         Self {
             constructor,
             fields,
         }
     }
 
-    pub fn constructor(&self) -> EncodedConstructorId {
-        self.constructor
+    pub fn constructor(&self) -> &EncodedConstructorId<Root> {
+        &self.constructor
     }
-    pub fn fields(&self) -> &RoleKeyedMirror {
+    pub fn fields(&self) -> &RoleKeyedMirror<Root> {
         &self.fields
     }
 
     /// Retrieve a manual mirror field through its typed role.
-    pub fn field<Role: FieldRole>(&self) -> Option<&FieldValue> {
+    pub fn field<Role: FieldRole>(&self) -> Option<&FieldValue<Root>> {
         self.fields.value::<Role>()
-    }
-
-    pub fn content_identity(&self) -> Result<ContentHash<StructuralValueDomain>, ArchiveError> {
-        ContentHash::of_core(self)
     }
 }
 
@@ -127,17 +177,4 @@ pub enum ScalarValue {
     Float(f64),
     Text(String),
     Boolean(bool),
-}
-
-/// Layout two is required because the archived mirror changed from an unkeyed
-/// product/tree to constructor plus role-keyed values.
-pub struct StructuralValueDomain;
-
-impl HashDomain for StructuralValueDomain {
-    fn separation() -> DomainSeparation {
-        DomainSeparation::Contextual {
-            context: "structural-codec 2026 structural mirror value",
-            layout: LayoutVersion::new(2),
-        }
-    }
 }
