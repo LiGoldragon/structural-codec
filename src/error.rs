@@ -117,7 +117,7 @@ pub enum DecodeError<Root> {
     #[error("no branch of a descriptor alternation matched")]
     NoDescriptorAlternative,
     #[error(
-        "ordered-sequence repetition at role {role:?} has no count that satisfies its typed tail: {refusal}"
+        "ordered-sequence repetition at role {role:?} has no count that satisfies its typed tail"
     )]
     SequenceRepetitionBoundary {
         role: StableRoleId,
