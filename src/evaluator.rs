@@ -655,6 +655,11 @@ where
                         error @ (DecodeError::ProductArityMismatch { .. }
                         | DecodeError::ProductPositionMismatch { .. }),
                     ) if single_decode_form => return Err(error),
+                    Err(error @ DecodeError::SequenceRepetitionBoundary { .. })
+                        if single_decode_form =>
+                    {
+                        return Err(error);
+                    }
                     Err(error) if error.is_structural_non_match() => {}
                     Err(error) => return Err(error),
                 }
@@ -1108,67 +1113,105 @@ where
         active: &[DecodeProgressKey<Root>],
         scope: DecodeScope<'_, '_>,
     ) -> Result<(), DecodeError<Root>> {
-        for (position, role) in sequence.members().iter().copied().enumerate() {
-            let descriptor = state.descriptor(role)?.clone();
-            if matches!(descriptor, SharedDescriptor::Repeated { .. }) {
-                self.decode_sequence_repeated_role(role, input, state, bindings, active)?;
-                continue;
-            }
-            let continuation = if position + 1 == sequence.len() {
-                scope.continuation
-            } else {
-                DecodeContinuation::Repeated
-            };
-            let before = input.position;
-            self.decode_role(
-                role,
-                input,
-                state,
-                bindings,
-                active,
-                DecodeScope {
-                    continuation,
-                    structural_stops: scope.structural_stops,
-                },
-            )?;
-            if input.position == before {
-                return Err(DecodeError::ProductPositionMismatch {
-                    position,
-                    role,
-                    bound: SourceBound::checked(input.source, before, before)?,
-                });
-            }
-        }
-        Ok(())
+        self.decode_ordered_sequence_from(sequence, 0, input, state, bindings, active, scope)
     }
 
-    fn decode_sequence_repeated_role<Bindings: DecodeNameBindings<Root> + ?Sized>(
+    #[allow(clippy::too_many_arguments)]
+    fn decode_ordered_sequence_from<Bindings: DecodeNameBindings<Root> + ?Sized>(
         &self,
-        role: StableRoleId,
+        sequence: &crate::form::OrderedSequence,
+        position: usize,
         input: &mut BoundedCursor<'_, '_>,
         state: &mut DecodeState<Root>,
         bindings: &Bindings,
         active: &[DecodeProgressKey<Root>],
-    ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
+        scope: DecodeScope<'_, '_>,
+    ) -> Result<(), DecodeError<Root>> {
+        let Some(role) = sequence.members().get(position).copied() else {
+            return Ok(());
+        };
         let descriptor = state.descriptor(role)?.clone();
-        let SharedDescriptor::Repeated {
+
+        if let SharedDescriptor::Repeated {
             minimum,
             maximum,
             element,
         } = descriptor
-        else {
-            return Err(DecodeError::MissingRole { role });
+        {
+            return self.decode_sequence_repetition_with_tail(
+                sequence, position, role, minimum, maximum, &element, input, state, bindings,
+                active, scope,
+            );
+        }
+
+        let continuation = if position + 1 == sequence.len() {
+            scope.continuation
+        } else {
+            DecodeContinuation::Repeated
         };
+        let before = input.position;
+        self.decode_role(
+            role,
+            input,
+            state,
+            bindings,
+            active,
+            DecodeScope {
+                continuation,
+                structural_stops: scope.structural_stops,
+            },
+        )?;
+        if input.position == before {
+            return Err(DecodeError::ProductPositionMismatch {
+                position,
+                role,
+                bound: SourceBound::checked(input.source, before, before)?,
+            });
+        }
+        self.decode_ordered_sequence_from(
+            sequence,
+            position + 1,
+            input,
+            state,
+            bindings,
+            active,
+            scope,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_sequence_repetition_with_tail<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        sequence: &crate::form::OrderedSequence,
+        position: usize,
+        role: StableRoleId,
+        minimum: u64,
+        maximum: Option<u64>,
+        element: &SharedDescriptor<Root>,
+        input: &mut BoundedCursor<'_, '_>,
+        state: &mut DecodeState<Root>,
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
+        scope: DecodeScope<'_, '_>,
+    ) -> Result<(), DecodeError<Root>> {
         input.skip_trivia(self)?;
         let start = input.position;
+        let mut scan_input = input.clone();
+        let mut scan_state = state.clone();
         let mut values = Vec::new();
+        let mut candidates = Vec::new();
+        if minimum == 0 {
+            candidates.push((scan_input.clone(), scan_state.clone(), values.clone()));
+        }
+        let mut best_refusal = None;
+
         while maximum
             .is_none_or(|top| u64::try_from(values.len()).expect("platform usize fits u64") < top)
         {
-            let mut candidate = input.clone();
-            let mut candidate_state = state.clone();
+            let mut candidate = scan_input.clone();
+            let mut candidate_state = scan_state.clone();
             match self.decode_descriptor(
-                &element,
+                element,
                 &mut candidate,
                 &mut candidate_state,
                 bindings,
@@ -1178,25 +1221,70 @@ where
                     structural_stops: &[],
                 },
             ) {
-                Ok(value) if candidate.position > input.position => {
-                    *input = candidate;
-                    *state = candidate_state;
+                Ok(value) if candidate.position > scan_input.position => {
+                    scan_input = candidate;
+                    scan_state = candidate_state;
                     values.push(value);
+                    if u64::try_from(values.len()).expect("platform usize fits u64") >= minimum {
+                        candidates.push((scan_input.clone(), scan_state.clone(), values.clone()));
+                    }
                 }
                 Ok(_) => return Err(DecodeError::LeafNotFlattenable),
-                Err(error) if error.is_structural_non_match() => break,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    best_refusal = Some((candidate.position, error));
+                    break;
+                }
             }
         }
-        let found = u64::try_from(values.len()).expect("platform usize fits u64");
-        if found < minimum {
-            return Err(DecodeError::RepetitionCardinality { found });
+
+        for (mut candidate_input, mut candidate_state, candidate_values) in
+            candidates.into_iter().rev()
+        {
+            let repeated = DraftFieldValue::Repeated(candidate_values);
+            let bound = SourceBound::checked(input.source, start, candidate_input.position)?;
+            candidate_state.fields.insert(role, repeated);
+            candidate_state.field_bounds.insert(role, bound);
+            match self.decode_ordered_sequence_from(
+                sequence,
+                position + 1,
+                &mut candidate_input,
+                &mut candidate_state,
+                bindings,
+                active,
+                scope,
+            ) {
+                Ok(()) => {
+                    *input = candidate_input;
+                    *state = candidate_state;
+                    return Ok(());
+                }
+                Err(refusal) => {
+                    let progress = candidate_input.position;
+                    let refusal_is_structural = refusal.is_structural_non_match();
+                    let replaces = best_refusal.as_ref().is_none_or(
+                        |(best_progress, best): &(usize, DecodeError<Root>)| {
+                            let best_is_structural = best.is_structural_non_match();
+                            (best_is_structural && !refusal_is_structural)
+                                || (best_is_structural == refusal_is_structural
+                                    && progress > *best_progress)
+                        },
+                    );
+                    if replaces {
+                        best_refusal = Some((progress, refusal));
+                    }
+                }
+            }
         }
-        let value = DraftFieldValue::Repeated(values);
-        let bound = SourceBound::checked(input.source, start, input.position)?;
-        state.fields.insert(role, value.clone());
-        state.field_bounds.insert(role, bound);
-        Ok(value)
+
+        let refusal = best_refusal.map(|(_, refusal)| refusal).unwrap_or_else(|| {
+            DecodeError::RepetitionCardinality {
+                found: u64::try_from(values.len()).expect("platform usize fits u64"),
+            }
+        });
+        Err(DecodeError::SequenceRepetitionBoundary {
+            role,
+            refusal: Box::new(refusal),
+        })
     }
 
     fn decode_repeated_role<Bindings: DecodeNameBindings<Root> + ?Sized>(

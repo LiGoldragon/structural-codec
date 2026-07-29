@@ -157,6 +157,10 @@ fixture_role!(DelimitedSequenceDeclarationRole, 953);
 fixture_role!(ApplicationBoundaryRootRole, 960);
 fixture_role!(ApplicationBoundaryRepeatedRole, 961);
 fixture_role!(ApplicationBoundaryLiteralRole, 962);
+fixture_role!(AmbiguousSequenceRootRole, 963);
+fixture_role!(AmbiguousSequenceRepeatedRole, 964);
+fixture_role!(AmbiguousSequenceRequiredRole, 965);
+fixture_role!(AmbiguousSequenceLiteralRole, 966);
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct SixSlotDocumentRecord<Root> {
@@ -492,6 +496,69 @@ impl<Root> StructureRecord<Root> for ApplicationBoundaryRecord<Root> {
 
     fn fields(&self) -> Self::View<'_> {
         ApplicationBoundaryView { record: self }
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+struct AmbiguousSequenceRecord<Root> {
+    root: Position<AmbiguousSequenceRootRole, Root>,
+    repeated: Position<AmbiguousSequenceRepeatedRole, Root>,
+    required: Position<AmbiguousSequenceRequiredRole, Root>,
+    literal: Position<AmbiguousSequenceLiteralRole, Root>,
+}
+
+impl<Root: Clone> AmbiguousSequenceRecord<Root> {
+    fn new(keyword: EncodedId<Root>, literal: EncodedId<Root>) -> Self {
+        let application = || SharedDescriptor::InlineApplication {
+            operator: APPLICATION,
+            head: Box::new(SharedDescriptor::Literal(keyword.clone())),
+            payload: Box::new(SharedDescriptor::Reference(AtomDescriptor::any_case())),
+        };
+        let sequence = OrderedSequence::try_new::<AmbiguousSequenceRepeatedRole>()
+            .and_then(OrderedSequence::then::<AmbiguousSequenceRequiredRole>)
+            .and_then(OrderedSequence::then::<AmbiguousSequenceLiteralRole>)
+            .expect("ambiguous repetition and its typed tail roles are distinct");
+        Self {
+            root: Position::try_new(SharedDescriptor::OrderedSequence(sequence))
+                .expect("ambiguous sequence"),
+            repeated: Position::try_new(SharedDescriptor::Repeated {
+                minimum: 0,
+                maximum: None,
+                element: Box::new(application()),
+            })
+            .expect("open repeated applications"),
+            required: Position::try_new(application()).expect("required application"),
+            literal: Position::try_new(SharedDescriptor::Literal(literal))
+                .expect("required tail literal"),
+        }
+    }
+}
+
+struct AmbiguousSequenceView<'record, Root> {
+    record: &'record AmbiguousSequenceRecord<Root>,
+}
+
+impl<Root> BorrowedFieldView<Root> for AmbiguousSequenceView<'_, Root> {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor) {
+        visitor.field(&self.record.root);
+        visitor.field(&self.record.repeated);
+        visitor.field(&self.record.required);
+        visitor.field(&self.record.literal);
+    }
+}
+
+impl<Root> StructureRecord<Root> for AmbiguousSequenceRecord<Root> {
+    type View<'record>
+        = AmbiguousSequenceView<'record, Root>
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.root.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        AmbiguousSequenceView { record: self }
     }
 }
 
@@ -1441,10 +1508,16 @@ fn repeated_application_boundary_is_proven_before_name_lookup() {
     assert_eq!(bindings.declaration_queries.get(), 0);
 
     let missing = Bindings::default();
+    let missing_result = evaluator.decode_text(&expected, "missing.Member Private", &missing);
     assert!(matches!(
-        evaluator.decode_text(&expected, "missing.Member Private", &missing),
-        Err(DecodeError::UnresolvedReference { bound })
-            if bound.start() == 0 && bound.end() == 7
+        missing_result,
+        Err(DecodeError::SequenceRepetitionBoundary { role, refusal })
+            if role.value() == ApplicationBoundaryRepeatedRole::STABLE_ID
+                && matches!(
+                    refusal.as_ref(),
+                    DecodeError::UnresolvedReference { bound }
+                        if bound.start() == 0 && bound.end() == 7
+                )
     ));
     assert_eq!(
         missing.reference_queries.get(),
@@ -1452,6 +1525,78 @@ fn repeated_application_boundary_is_proven_before_name_lookup() {
         "once the operator is present, the typed lookup-only failure controls"
     );
     assert_eq!(missing.declaration_queries.get(), 0);
+}
+
+#[test]
+fn ordered_sequence_chooses_the_greatest_repetition_count_with_a_typed_tail() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[10, 30]);
+    let keyword = encoded(FirstFixtureRoot::Universal, &[10, 31]);
+    let private = encoded(FirstFixtureRoot::Universal, &[10, 32]);
+    let record = AmbiguousSequenceRecord::new(keyword.clone(), private.clone());
+    let constructor = EncodedConstructorId::under(&expected, 1);
+    let sequence_entry = StructuralEntry::new(
+        expected.clone(),
+        vec![ConstructorCodec::new(
+            constructor,
+            vec![AcceptedDecodeForm::new(
+                DecodeFormId::new(1),
+                record.clone(),
+            )],
+            record,
+        )],
+    );
+    let profile = profile();
+    let sequence_table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"greatest viable sequence repetition"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"typed sequence tail backtracking"),
+            discovery(),
+            rendering(),
+            vec![sequence_entry],
+        ),
+        &profile,
+    )
+    .expect("ambiguous sequence table");
+    let evaluator = StructuralEvaluator::new(&sequence_table).expect("shared evaluator");
+
+    let source = "Realize.first Realize.second Private";
+    let first = encoded(FirstFixtureRoot::Universal, &[10, 33]);
+    let second = encoded(FirstFixtureRoot::Universal, &[10, 34]);
+    let mut bindings = Bindings::default();
+    bindings.spelling(&keyword, "Realize");
+    bindings.spelling(&private, "Private");
+    bindings.reference(8, 13, "first", &first);
+    bindings.reference(22, 28, "second", &second);
+    let decoded = evaluator
+        .decode_text(&expected, source, &bindings)
+        .expect("the greatest viable repetition count is one");
+    assert!(matches!(
+        decoded.field::<AmbiguousSequenceRepeatedRole>(),
+        Some(FieldValue::Repeated(values)) if values.len() == 1
+    ));
+    assert!(matches!(
+        decoded.field::<AmbiguousSequenceRequiredRole>(),
+        Some(FieldValue::Application { payload, .. })
+            if matches!(payload.as_ref(), FieldValue::Reference(found) if found.encoded_id() == &second)
+    ));
+    assert!(matches!(
+        decoded.field::<AmbiguousSequenceLiteralRole>(),
+        Some(FieldValue::Literal(found)) if found == &private
+    ));
+
+    let refusal_source = "Realize.only Mystery";
+    let only = encoded(FirstFixtureRoot::Universal, &[10, 35]);
+    let mut refusal_bindings = Bindings::default();
+    refusal_bindings.spelling(&keyword, "Realize");
+    refusal_bindings.spelling(&private, "Private");
+    refusal_bindings.reference(8, 12, "only", &only);
+    assert!(matches!(
+        evaluator.decode_text(&expected, refusal_source, &refusal_bindings),
+        Err(DecodeError::SequenceRepetitionBoundary { role, refusal })
+            if role.value() == AmbiguousSequenceRepeatedRole::STABLE_ID
+                && matches!(refusal.as_ref(), DecodeError::LiteralMismatch)
+    ));
 }
 
 #[test]

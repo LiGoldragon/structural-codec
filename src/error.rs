@@ -116,12 +116,22 @@ pub enum DecodeError<Root> {
     NoAlternative { core_type: EncodedTypeId<Root> },
     #[error("no branch of a descriptor alternation matched")]
     NoDescriptorAlternative,
+    #[error(
+        "ordered-sequence repetition at role {role:?} has no count that satisfies its typed tail: {refusal}"
+    )]
+    SequenceRepetitionBoundary {
+        role: StableRoleId,
+        refusal: Box<DecodeError<Root>>,
+    },
     #[error("source did not contain exactly one root object")]
     RootObjectCount,
 }
 
 impl<Root> DecodeError<Root> {
     pub(crate) fn is_structural_non_match(&self) -> bool {
+        if let Self::SequenceRepetitionBoundary { refusal, .. } = self {
+            return refusal.is_structural_non_match();
+        }
         matches!(
             self,
             Self::BlockKindMismatch { .. }
