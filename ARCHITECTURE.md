@@ -39,7 +39,7 @@ the table identity is derived.
 
 `EncodedTypeId<Root>` retains one complete non-empty
 `name_table::EncodedId<Root>`. It has no flat local projection and no
-Schema/Logos/Nomos component dimension. `EncodedConstructorId<Root>` keeps its
+Ethos/Logos/Nomos component dimension. `EncodedConstructorId<Root>` keeps its
 complete owning type identity plus a constructor-local number.
 
 Named structural positions are explicit:
