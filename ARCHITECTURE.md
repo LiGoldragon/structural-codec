@@ -18,6 +18,12 @@ a delegated expected type. Decode consumes exactly one discovered sibling
 block per member; consumers retrieve each result and source bound by its role,
 never through an indexed root vector.
 
+`OrderedSequence` links mixed lexical and bounded typed positions inside one
+source bound. The shared evaluator advances those positions in declared order,
+including bounded optional repetition, and encoding follows the same links in
+reverse. It is the complete-record surface for languages such as Rust whose
+item positions are not all sibling blocks.
+
 All table, proof, decode, and encode machinery is generic over a caller-supplied
 root enum and a `StructureRecord<Root>`. `StructuralRule<Root>` is the kernel
 convenience vocabulary. Downstream typed records can be combined with
@@ -62,7 +68,8 @@ bounded cursor. Token reads consume the longest run accepted at the current
 lexical position. Typed disjointness and conservative refusal govern above the
 token level.
 
-Products advance field by field, repetition advances element by element,
+Products advance sibling block by sibling block, ordered sequences advance
+lexical position by lexical position, repetition advances element by element,
 applications consume their expected operator, and bounded descriptors enter
 already-discovered children. Encoding follows the same descriptors in reverse
 under the table-owned rendering policy.
@@ -81,9 +88,9 @@ encoding of an encoded-ID chain. It does not define Capsule/table pin
 composition, move, retirement, dynamic-enum identity, or recursive per-thing
 content hashing.
 
-The table identity layout is 10 because the archived identity payload now
-carries generic full-chain identities, typed name-position roles, and the
-ordered-product descriptor.
+The table identity layout is 11 because the archived identity payload now
+carries generic full-chain identities, typed name-position roles, and distinct
+ordered-product and ordered-sequence descriptors.
 
 The former internal test corpus depended on the retired flat, locally
 allocating `NameTable` API. Its structural/refusal claims are rehomed in the

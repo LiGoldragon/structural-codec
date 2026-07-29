@@ -36,6 +36,7 @@ impl<Root: Clone> FieldVisitor<Root> for DescriptorCollector<Root> {
     }
 }
 
+#[derive(Clone)]
 struct DecodeState<Root> {
     fields: BTreeMap<StableRoleId, DraftFieldValue<Root>>,
     field_bounds: BTreeMap<StableRoleId, SourceBound>,
@@ -296,6 +297,7 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
         &mut self,
         evaluator: &StructuralEvaluator<'_, Root, Record>,
         continuation: DecodeContinuation<'_>,
+        structural_stops: &[String],
     ) -> Result<bool, DecodeError<Root>>
     where
         Root: Clone + Ord,
@@ -315,6 +317,14 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
                     .local_match(evaluator)?
                     .is_some_and(|matched| matched.is_trivia())
                 {
+                    let mut after_trivia = self.clone();
+                    after_trivia.skip_trivia(evaluator)?;
+                    if structural_stops.iter().any(|text| {
+                        after_trivia.source[after_trivia.position..after_trivia.bound.end()]
+                            .starts_with(text)
+                    }) {
+                        return Ok(false);
+                    }
                     return Ok(true);
                 }
                 Ok(
@@ -589,7 +599,7 @@ where
                     &next_active,
                     scope,
                 ) {
-                    Ok(_) if candidate.completes(self, continuation)? => {
+                    Ok(_) if candidate.completes(self, continuation, scope.structural_stops)? => {
                         *input = candidate;
                         return Ok(DraftStructuralValue {
                             constructor: codec.constructor().clone(),
@@ -627,6 +637,25 @@ where
                 let root = accepted.rule().root_role();
                 if let SharedDescriptor::Application { operator, .. } = state.descriptor(root)? {
                     operators.insert(self.operator_text(*operator)?);
+                }
+                if let SharedDescriptor::OrderedSequence(sequence) = state.descriptor(root)? {
+                    let Some(second) = sequence.members().get(1) else {
+                        continue;
+                    };
+                    if let SharedDescriptor::Delimited { boundary, .. }
+                    | SharedDescriptor::ItemBoundary { boundary, .. } =
+                        state.descriptor(*second)?
+                    {
+                        let Trigger::Boundary { opening, .. } =
+                            &self.profile.definition(*boundary)?.trigger
+                        else {
+                            return Err(DecodeError::BlockKindMismatch {
+                                expected: "boundary trigger",
+                                found: "profile trigger",
+                            });
+                        };
+                        operators.insert(opening.clone());
+                    }
                 }
             }
         }
@@ -754,6 +783,10 @@ where
                 self.decode_ordered_product(product, input, state, bindings, active)?;
                 Ok(DraftFieldValue::OrderedProduct)
             }
+            SharedDescriptor::OrderedSequence(sequence) => {
+                self.decode_ordered_sequence(sequence, input, state, bindings, active, scope)?;
+                Ok(DraftFieldValue::OrderedProduct)
+            }
             SharedDescriptor::Application {
                 operator,
                 head,
@@ -861,6 +894,106 @@ where
             }
         }
         Ok(())
+    }
+
+    fn decode_ordered_sequence<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        sequence: &crate::form::OrderedSequence,
+        input: &mut BoundedCursor<'_, '_>,
+        state: &mut DecodeState<Root>,
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
+        scope: DecodeScope<'_, '_>,
+    ) -> Result<(), DecodeError<Root>> {
+        for (position, role) in sequence.members().iter().copied().enumerate() {
+            let descriptor = state.descriptor(role)?.clone();
+            if matches!(descriptor, SharedDescriptor::Repeated { .. }) {
+                self.decode_sequence_repeated_role(role, input, state, bindings, active)?;
+                continue;
+            }
+            let continuation = if position + 1 == sequence.len() {
+                scope.continuation
+            } else {
+                DecodeContinuation::Repeated
+            };
+            let before = input.position;
+            self.decode_role(
+                role,
+                input,
+                state,
+                bindings,
+                active,
+                DecodeScope {
+                    continuation,
+                    structural_stops: scope.structural_stops,
+                },
+            )?;
+            if input.position == before {
+                return Err(DecodeError::ProductPositionMismatch {
+                    position,
+                    role,
+                    bound: SourceBound::checked(input.source, before, before)?,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_sequence_repeated_role<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        role: StableRoleId,
+        input: &mut BoundedCursor<'_, '_>,
+        state: &mut DecodeState<Root>,
+        bindings: &Bindings,
+        active: &[DecodeProgressKey<Root>],
+    ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
+        let descriptor = state.descriptor(role)?.clone();
+        let SharedDescriptor::Repeated {
+            minimum,
+            maximum,
+            element,
+        } = descriptor
+        else {
+            return Err(DecodeError::MissingRole { role });
+        };
+        input.skip_trivia(self)?;
+        let start = input.position;
+        let mut values = Vec::new();
+        while maximum
+            .is_none_or(|top| u64::try_from(values.len()).expect("platform usize fits u64") < top)
+        {
+            let mut candidate = input.clone();
+            let mut candidate_state = state.clone();
+            match self.decode_descriptor(
+                &element,
+                &mut candidate,
+                &mut candidate_state,
+                bindings,
+                active,
+                DecodeScope {
+                    continuation: DecodeContinuation::Repeated,
+                    structural_stops: &[],
+                },
+            ) {
+                Ok(value) if candidate.position > input.position => {
+                    *input = candidate;
+                    *state = candidate_state;
+                    values.push(value);
+                }
+                Ok(_) => return Err(DecodeError::LeafNotFlattenable),
+                Err(error) if error.is_structural_non_match() => break,
+                Err(error) => return Err(error),
+            }
+        }
+        let found = u64::try_from(values.len()).expect("platform usize fits u64");
+        if found < minimum {
+            return Err(DecodeError::RepetitionCardinality { found });
+        }
+        let value = DraftFieldValue::Repeated(values);
+        let bound = SourceBound::checked(input.source, start, input.position)?;
+        state.fields.insert(role, value.clone());
+        state.field_bounds.insert(role, bound);
+        Ok(value)
     }
 
     fn decode_repeated_role<Bindings: DecodeNameBindings<Root> + ?Sized>(
@@ -1114,6 +1247,14 @@ where
                     .collect::<Result<Vec<_>, _>>()?;
                 self.join_product_members(rendered, context)
             }
+            (SharedDescriptor::OrderedSequence(sequence), FieldValue::OrderedProduct) => {
+                let rendered = sequence
+                    .members()
+                    .iter()
+                    .map(|role| self.encode_role(*role, descriptors, mirror, resolver, context))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.join_product_members(rendered, context)
+            }
             (
                 SharedDescriptor::Application {
                     operator,
@@ -1163,6 +1304,23 @@ where
                     closing,
                 ))
             }
+            (
+                SharedDescriptor::Repeated {
+                    minimum,
+                    maximum,
+                    element,
+                },
+                FieldValue::Repeated(values),
+            ) => self.encode_repeated_values(
+                element,
+                *minimum,
+                *maximum,
+                values,
+                descriptors,
+                mirror,
+                resolver,
+                context,
+            ),
             _ => Err(EncodeError::ShapeMismatch),
         }
     }
@@ -1199,7 +1357,11 @@ where
         resolver: &Resolver,
         context: BoundaryDiscoveryContextIdentifier,
     ) -> Result<String, EncodeError<Root>> {
-        let SharedDescriptor::Repeated { element, .. } = descriptors
+        let SharedDescriptor::Repeated {
+            minimum,
+            maximum,
+            element,
+        } = descriptors
             .get(&role)
             .ok_or(EncodeError::MissingRole { role })?
         else {
@@ -1211,6 +1373,34 @@ where
         else {
             return Err(EncodeError::ShapeMismatch);
         };
+        self.encode_repeated_values(
+            element,
+            *minimum,
+            *maximum,
+            values,
+            descriptors,
+            mirror,
+            resolver,
+            context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_repeated_values<Resolver: EncodedNameResolver<Root> + ?Sized>(
+        &self,
+        element: &SharedDescriptor<Root>,
+        minimum: u64,
+        maximum: Option<u64>,
+        values: &[FieldValue<Root>],
+        descriptors: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+        mirror: &RoleKeyedMirror<Root>,
+        resolver: &Resolver,
+        context: BoundaryDiscoveryContextIdentifier,
+    ) -> Result<String, EncodeError<Root>> {
+        let found = u64::try_from(values.len()).expect("platform usize fits u64");
+        if found < minimum || maximum.is_some_and(|top| found > top) {
+            return Err(EncodeError::RepetitionCardinality { found });
+        }
         let rendered = values
             .iter()
             .map(|value| {

@@ -274,8 +274,8 @@ dependencies = [
 
 [[package]]
 name = "raw-discovery"
-version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/raw-discovery.git?rev=d979778aa9d79199785f7b683f1029534aea3604#d979778aa9d79199785f7b683f1029534aea3604"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/raw-discovery.git?rev=7290f65bbb5e7825ab2ca58340631d154d69d110#7290f65bbb5e7825ab2ca58340631d154d69d110"
 dependencies = [
  "content-identity 0.3.0",
  "rkyv",
@@ -347,7 +347,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "structural-codec"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "content-identity 0.3.0",
  "name-table",

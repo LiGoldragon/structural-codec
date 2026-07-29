@@ -61,8 +61,9 @@ pub use form::{
     ApplicationDelimitedItems, ApplicationDelimitedRoot, ApplicationDelimitedRule,
     ApplicationFieldView, ApplicationHead, ApplicationPayload, ApplicationRoot, ApplicationRule,
     AtomDescriptor, BorrowedFieldView, DelegationPayload, FieldEnd, FieldLink, FieldVisitor,
-    ForeignLeafId, LeafCodec, OrderedProduct, Position, RuleCoproduct, RuleCoproductView,
-    SharedDescriptor, StructuralRule, StructuralRuleView, StructureRecord, UnaryRoot, UnaryRule,
+    ForeignLeafId, LeafCodec, OrderedProduct, OrderedSequence, Position, RuleCoproduct,
+    RuleCoproductView, SharedDescriptor, StructuralRule, StructuralRuleView, StructureRecord,
+    UnaryRoot, UnaryRule,
 };
 pub use ids::{DecodeFormId, EncodedConstructorId, EncodedTypeId, FieldRole, StableRoleId};
 pub use name_table::{EncodedId, LocalEncodedId, TableAddress};

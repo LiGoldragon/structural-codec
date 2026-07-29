@@ -1,6 +1,6 @@
 [package]
 name         = "structural-codec"
-version      = "0.7.0"
+version      = "0.8.0"
 autotests    = false
 edition      = "2024"
 rust-version = "1.85"
@@ -20,7 +20,7 @@ path = "tests/downstream_authoring.rs"
 [dependencies]
 content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "24b43bae5d9748b0e7f679c6ec9f85a643c4d36a" }
 name-table       = { git = "https://github.com/LiGoldragon/name-table.git", rev = "50cb4bb53ae2dc4f2516f6912be328ef98ae49f8" }
-raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "d979778aa9d79199785f7b683f1029534aea3604" }
+raw-discovery    = { git = "https://github.com/LiGoldragon/raw-discovery.git", rev = "7290f65bbb5e7825ab2ca58340631d154d69d110" }
 rkyv             = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 thiserror        = "2"
 

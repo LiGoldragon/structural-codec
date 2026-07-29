@@ -155,6 +155,8 @@ pub enum EncodeError<Root> {
     },
     #[error("delegated position did not satisfy {payload:?}")]
     DelegationPayloadMismatch { payload: DelegationPayload },
+    #[error("repeated position held {found} objects outside its declared bounds")]
+    RepetitionCardinality { found: u64 },
     #[error("typed role {role:?} is absent from this record or mirror")]
     MissingRole { role: StableRoleId },
     #[error("a value spelling would not decode canonically")]
@@ -205,6 +207,8 @@ pub enum TableError<Root> {
     DuplicateProductRole { role: StableRoleId },
     #[error("ordered product member role {role:?} is not a delegated expected type")]
     ProductMemberNotDelegate { role: StableRoleId },
+    #[error("ordered sequence repeats member role {role:?}")]
+    DuplicateSequenceRole { role: StableRoleId },
     #[error("trigger {identifier:?} does not provide the required role")]
     WrongTriggerKind { identifier: TriggerIdentifier },
     #[error(

@@ -179,14 +179,15 @@ impl<Root: Ord, Record> TableIdentityPayload<Root, Record> {
     }
 }
 
-/// The table now archives pass-one boundary data. Its identity layout advances
-/// independently of the unchanged structural-value layout.
+/// The table archives pass-one boundary data and the descriptor vocabulary.
+/// Its identity layout advances independently of the unchanged
+/// structural-value layout.
 pub struct StructuralTableDomain;
 impl HashDomain for StructuralTableDomain {
     fn separation() -> DomainSeparation {
         DomainSeparation::Contextual {
             context: "structural-codec 2026 addressed structural table",
-            layout: LayoutVersion::new(10),
+            layout: LayoutVersion::new(11),
         }
     }
 }
@@ -530,6 +531,18 @@ where
                     if !matches!(child, SharedDescriptor::Delegate { .. }) {
                         return Err(TableError::ProductMemberNotDelegate { role: *role });
                     }
+                    Self::validate_descriptor(child, roles, profile, block_discovery)?;
+                }
+            }
+            SharedDescriptor::OrderedSequence(sequence) => {
+                let mut members = std::collections::BTreeSet::new();
+                for role in sequence.members() {
+                    if !members.insert(*role) {
+                        return Err(TableError::DuplicateSequenceRole { role: *role });
+                    }
+                    let child = roles
+                        .get(role)
+                        .ok_or(TableError::MissingRole { role: *role })?;
                     Self::validate_descriptor(child, roles, profile, block_discovery)?;
                 }
             }

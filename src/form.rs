@@ -120,6 +120,49 @@ impl OrderedProduct {
     }
 }
 
+/// A fixed lexical sequence of real typed positions.
+///
+/// Unlike [`OrderedProduct`], whose members are already-discovered sibling
+/// blocks, an ordered sequence advances through mixed lexical and bounded
+/// positions inside one source bound. Every member remains a separate field
+/// in the enclosing archived record.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct OrderedSequence {
+    members: Vec<StableRoleId>,
+}
+
+impl OrderedSequence {
+    /// Start a non-empty lexical sequence with one typed field role.
+    pub fn try_new<Role: FieldRole>() -> Result<Self, AuthoringError> {
+        let member = RoleIdentity::<Role>::try_for_role()?.stable();
+        Ok(Self {
+            members: vec![member],
+        })
+    }
+
+    /// Append one typed field role to the lexical sequence.
+    pub fn then<Role: FieldRole>(mut self) -> Result<Self, AuthoringError> {
+        let member = RoleIdentity::<Role>::try_for_role()?.stable();
+        if self.members.contains(&member) {
+            return Err(AuthoringError::DuplicateRoleIdentity { role: member });
+        }
+        self.members.push(member);
+        Ok(self)
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    pub(crate) fn members(&self) -> &[StableRoleId] {
+        &self.members
+    }
+}
+
 /// Data interpreted by the one evaluator. Role links name actual fields in the
 /// enclosing archived record; fixed position payloads are never stored in a
 /// recursive generic layout or retrieved by numeric index.
@@ -144,6 +187,8 @@ pub enum SharedDescriptor<Root> {
     /// A fixed ordered sequence of sibling source blocks. Every linked role
     /// must carry a [`SharedDescriptor::Delegate`]; sealing verifies this.
     OrderedProduct(OrderedProduct),
+    /// A fixed ordered sequence of mixed lexical and bounded typed positions.
+    OrderedSequence(OrderedSequence),
     Application {
         operator: TriggerIdentifier,
         head: StableRoleId,

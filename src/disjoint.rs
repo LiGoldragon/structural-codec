@@ -36,6 +36,7 @@ enum Outer<'a, Root> {
     Literal(&'a name_table::EncodedId<Root>),
     Application(&'a SharedDescriptor<Root>, &'a SharedDescriptor<Root>),
     Boundary(raw_discovery::TriggerIdentifier),
+    Sequence(&'a crate::form::OrderedSequence),
     Opaque,
 }
 
@@ -73,6 +74,7 @@ fn outer<'a, Root>(
         }
         SharedDescriptor::Delimited { boundary, .. }
         | SharedDescriptor::ItemBoundary { boundary, .. } => Ok(Outer::Boundary(*boundary)),
+        SharedDescriptor::OrderedSequence(sequence) => Ok(Outer::Sequence(sequence)),
         SharedDescriptor::Leaf(_)
         | SharedDescriptor::Repeated { .. }
         | SharedDescriptor::OrderedProduct(_) => Ok(Outer::Opaque),
@@ -230,6 +232,65 @@ where
             | (Outer::Boundary(_), Outer::Application(_, _)) => Ok(()),
             (Outer::Boundary(left), Outer::Boundary(right)) if left != right => Ok(()),
             (Outer::Boundary(_), Outer::Boundary(_)) => reason(DisjointnessReason::SharedBoundary),
+            (Outer::Sequence(left), Outer::Sequence(right)) => {
+                let mut first_cycle = None;
+                for (left_role, right_role) in left
+                    .members()
+                    .iter()
+                    .copied()
+                    .zip(right.members().iter().copied())
+                {
+                    let left_member = left_roles.get(&left_role).ok_or(ProofFailure::Reason(
+                        DisjointnessReason::MissingRole { role: left_role },
+                    ))?;
+                    let right_member = right_roles.get(&right_role).ok_or(ProofFailure::Reason(
+                        DisjointnessReason::MissingRole { role: right_role },
+                    ))?;
+                    match prove(
+                        left_member,
+                        left_roles,
+                        right_member,
+                        right_roles,
+                        entries,
+                        active,
+                    ) {
+                        Ok(()) => return Ok(()),
+                        Err(ProofFailure::Cycle(reentered)) => {
+                            first_cycle.get_or_insert(reentered);
+                        }
+                        Err(ProofFailure::Reason(_)) => {}
+                    }
+                }
+                match first_cycle {
+                    Some(reentered) => Err(ProofFailure::Cycle(reentered)),
+                    None => reason(DisjointnessReason::OpaqueForm),
+                }
+            }
+            (
+                Outer::Sequence(sequence),
+                Outer::Named(_) | Outer::Literal(_) | Outer::Boundary(_),
+            ) => prove_sequence_against_atom(
+                sequence,
+                left_roles,
+                right,
+                right_roles,
+                entries,
+                active,
+            ),
+            (
+                Outer::Named(_) | Outer::Literal(_) | Outer::Boundary(_),
+                Outer::Sequence(sequence),
+            ) => prove_sequence_against_atom(
+                sequence,
+                right_roles,
+                left,
+                left_roles,
+                entries,
+                active,
+            ),
+            (Outer::Sequence(_), _) | (_, Outer::Sequence(_)) => {
+                reason(DisjointnessReason::OpaqueForm)
+            }
             (
                 Outer::Application(left_head, left_payload),
                 Outer::Application(right_head, right_payload),
@@ -259,6 +320,65 @@ where
                 },
             },
         },
+    }
+}
+
+fn prove_sequence_against_atom<Root, Record>(
+    sequence: &crate::form::OrderedSequence,
+    sequence_roles: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+    atom: &SharedDescriptor<Root>,
+    atom_roles: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+    entries: Option<&[StructuralEntry<Root, Record>]>,
+    active: &mut BTreeSet<EncodedTypeId<Root>>,
+) -> ProofResult<Root>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
+    let Some((first, tail)) = sequence.members().split_first() else {
+        return reason(DisjointnessReason::OpaqueForm);
+    };
+    let first =
+        sequence_roles
+            .get(first)
+            .ok_or(ProofFailure::Reason(DisjointnessReason::MissingRole {
+                role: *first,
+            }))?;
+    if prove(first, sequence_roles, atom, atom_roles, entries, active).is_ok() {
+        return Ok(());
+    }
+    if tail.iter().any(|role| {
+        sequence_roles
+            .get(role)
+            .is_some_and(|descriptor| directly_guaranteed_nonempty(descriptor, sequence_roles))
+    }) {
+        return Ok(());
+    }
+    reason(DisjointnessReason::OpaqueForm)
+}
+
+fn directly_guaranteed_nonempty<Root>(
+    descriptor: &SharedDescriptor<Root>,
+    roles: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
+) -> bool {
+    match descriptor {
+        SharedDescriptor::Declaration(_)
+        | SharedDescriptor::Reference(_)
+        | SharedDescriptor::Literal(_)
+        | SharedDescriptor::Leaf(_)
+        | SharedDescriptor::Application { .. }
+        | SharedDescriptor::Delimited { .. }
+        | SharedDescriptor::ItemBoundary { .. } => true,
+        SharedDescriptor::Repeated {
+            minimum, element, ..
+        } => *minimum > 0 && directly_guaranteed_nonempty(element, roles),
+        SharedDescriptor::OrderedSequence(sequence) => sequence.members().iter().any(|role| {
+            roles
+                .get(role)
+                .is_some_and(|member| directly_guaranteed_nonempty(member, roles))
+        }),
+        SharedDescriptor::OrderedProduct(product) => !product.is_empty(),
+        SharedDescriptor::Delegate { .. } => false,
     }
 }
 

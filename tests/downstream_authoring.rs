@@ -14,10 +14,11 @@ use structural_codec::{
     ApplicationRule, AtomCase, AtomDescriptor, BorrowedFieldView, ConstructorCodec,
     ContextualTextualPolicy, DeclarationAssignment, DecodeError, DecodeFormId, DecodeNameBindings,
     EncodedConstructorId, EncodedNameResolver, EncodedTypeId, FieldEnd, FieldLink, FieldRole,
-    FieldValue, FieldVisitor, NameOccurrence, OrderedProduct, Position, ResolvedReference,
-    RuleCoproduct, SharedDescriptor, StableRoleId, StructuralEntry, StructuralEvaluator,
-    StructuralRule, StructuralVocabularyIdentity, StructureRecord, TableError,
-    TableIdentityPayload, TargetLayoutIdentity, TextualRenderingPolicy, UnaryRule,
+    FieldValue, FieldVisitor, NameOccurrence, OrderedProduct, OrderedSequence, Position,
+    ResolvedReference, RuleCoproduct, SharedDescriptor, StableRoleId, StructuralEntry,
+    StructuralEvaluator, StructuralRule, StructuralValue, StructuralVocabularyIdentity,
+    StructureRecord, TableError, TableIdentityPayload, TargetLayoutIdentity,
+    TextualRenderingPolicy, UnaryRule,
 };
 
 const SQUARE: TriggerIdentifier = TriggerIdentifier::new(1);
@@ -145,6 +146,9 @@ fixture_role!(GenericsRole, 915);
 fixture_role!(ImplsRole, 916);
 fixture_role!(DelimitedRootRole, 920);
 fixture_role!(DelimitedItemsRole, 921);
+fixture_role!(SequenceRootRole, 930);
+fixture_role!(SequenceKeywordRole, 931);
+fixture_role!(SequenceDeclarationRole, 932);
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct SixSlotDocumentRecord<Root> {
@@ -274,6 +278,58 @@ impl<Root> StructureRecord<Root> for DelimitedItemsRecord<Root> {
 
     fn fields(&self) -> Self::View<'_> {
         DelimitedItemsView { record: self }
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+struct LexicalSequenceRecord<Root> {
+    sequence: Position<SequenceRootRole, Root>,
+    keyword: Position<SequenceKeywordRole, Root>,
+    declaration: Position<SequenceDeclarationRole, Root>,
+}
+
+impl<Root: Clone> LexicalSequenceRecord<Root> {
+    fn new(keyword: EncodedId<Root>) -> Self {
+        let sequence = OrderedSequence::try_new::<SequenceKeywordRole>()
+            .and_then(OrderedSequence::then::<SequenceDeclarationRole>)
+            .expect("two distinct lexical positions");
+        Self {
+            sequence: Position::try_new(SharedDescriptor::OrderedSequence(sequence))
+                .expect("sequence root"),
+            keyword: Position::try_new(SharedDescriptor::Literal(keyword))
+                .expect("keyword position"),
+            declaration: Position::try_new(SharedDescriptor::Declaration(
+                AtomDescriptor::with_case(AtomCase::PascalCase),
+            ))
+            .expect("declaration position"),
+        }
+    }
+}
+
+struct LexicalSequenceView<'record, Root> {
+    record: &'record LexicalSequenceRecord<Root>,
+}
+
+impl<Root> BorrowedFieldView<Root> for LexicalSequenceView<'_, Root> {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor) {
+        visitor.field(&self.record.sequence);
+        visitor.field(&self.record.keyword);
+        visitor.field(&self.record.declaration);
+    }
+}
+
+impl<Root> StructureRecord<Root> for LexicalSequenceRecord<Root> {
+    type View<'record>
+        = LexicalSequenceView<'record, Root>
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.sequence.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        LexicalSequenceView { record: self }
     }
 }
 
@@ -745,6 +801,79 @@ fn downstream_typed_record_uses_the_same_shared_evaluator() {
         value.field::<DownstreamDeclarationRole>(),
         Some(FieldValue::Declaration(found)) if found.encoded_id() == &assigned
     ));
+}
+
+#[test]
+fn ordered_sequence_decodes_and_encodes_mixed_lexical_positions() {
+    let expected = type_id(FirstFixtureRoot::Rust, &[8, 1]);
+    let keyword = encoded(FirstFixtureRoot::Rust, &[3]);
+    let record = LexicalSequenceRecord::new(keyword.clone());
+    let constructor = EncodedConstructorId::under(&expected, 1);
+    let entry = StructuralEntry::new(
+        expected.clone(),
+        vec![ConstructorCodec::new(
+            constructor.clone(),
+            vec![AcceptedDecodeForm::new(
+                DecodeFormId::new(1),
+                record.clone(),
+            )],
+            record,
+        )],
+    );
+    let profile = profile();
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"mixed lexical sequence layout"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"mixed lexical sequence vocabulary"),
+            discovery(),
+            rendering(),
+            vec![entry],
+        ),
+        &profile,
+    )
+    .expect("sequence table");
+    let declaration = encoded(FirstFixtureRoot::Universal, &[7, 16]);
+    let mut bindings = Bindings::default();
+    bindings.spelling(&keyword, "pub");
+    bindings.declaration(4, 10, "Widget", &declaration);
+
+    let evaluator = StructuralEvaluator::new(&table).expect("sequence evaluator");
+    let decoded = evaluator
+        .decode_text(&expected, "pub Widget", &bindings)
+        .expect("mixed lexical positions");
+    assert!(matches!(
+        decoded.field::<SequenceKeywordRole>(),
+        Some(FieldValue::Literal(found)) if found == &keyword
+    ));
+    assert!(matches!(
+        decoded.field::<SequenceDeclarationRole>(),
+        Some(FieldValue::Declaration(found)) if found.encoded_id() == &declaration
+    ));
+
+    let mut reflected = StructuralValue::record(constructor);
+    reflected
+        .insert::<SequenceRootRole>(FieldValue::OrderedProduct)
+        .expect("sequence marker");
+    reflected
+        .insert::<SequenceKeywordRole>(FieldValue::Literal(keyword))
+        .expect("keyword");
+    reflected
+        .insert::<SequenceDeclarationRole>(FieldValue::Declaration(DeclarationAssignment::new(
+            declaration,
+        )))
+        .expect("declaration");
+    assert_eq!(
+        evaluator
+            .encode_text(&expected, &reflected.finish(), &bindings)
+            .expect("sequence encoding"),
+        "pub Widget"
+    );
+    assert!(
+        evaluator
+            .decode_text(&expected, "Widget pub", &bindings)
+            .is_err()
+    );
 }
 
 #[test]
