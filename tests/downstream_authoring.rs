@@ -149,6 +149,11 @@ fixture_role!(DelimitedItemsRole, 921);
 fixture_role!(SequenceRootRole, 930);
 fixture_role!(SequenceKeywordRole, 931);
 fixture_role!(SequenceDeclarationRole, 932);
+fixture_role!(DerivedFutureRole, 940);
+fixture_role!(DelimitedSequenceRootRole, 950);
+fixture_role!(DelimitedSequenceContentRole, 951);
+fixture_role!(DelimitedSequenceKeywordRole, 952);
+fixture_role!(DelimitedSequenceDeclarationRole, 953);
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct SixSlotDocumentRecord<Root> {
@@ -330,6 +335,102 @@ impl<Root> StructureRecord<Root> for LexicalSequenceRecord<Root> {
 
     fn fields(&self) -> Self::View<'_> {
         LexicalSequenceView { record: self }
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+struct DerivedFutureRecord<Root> {
+    future_or_value: Position<DerivedFutureRole, Root>,
+}
+
+impl<Root: Clone> DerivedFutureRecord<Root> {
+    fn new(keyword: EncodedId<Root>) -> Self {
+        Self {
+            future_or_value: Position::try_new(SharedDescriptor::Alternation(vec![
+                SharedDescriptor::InlineApplication {
+                    operator: APPLICATION,
+                    head: Box::new(SharedDescriptor::Literal(keyword)),
+                    payload: Box::new(SharedDescriptor::Reference(AtomDescriptor::any_case())),
+                },
+                SharedDescriptor::Declaration(AtomDescriptor::any_case()),
+            ]))
+            .expect("derived future role"),
+        }
+    }
+}
+
+impl<Root> StructureRecord<Root> for DerivedFutureRecord<Root> {
+    type View<'record>
+        = FieldLink<'record, DerivedFutureRole, Root, FieldEnd>
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.future_or_value.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        FieldLink::new(&self.future_or_value, FieldEnd)
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+struct GenericDelimitedContentRecord<Root> {
+    root: Position<DelimitedSequenceRootRole, Root>,
+    content: Position<DelimitedSequenceContentRole, Root>,
+    keyword: Position<DelimitedSequenceKeywordRole, Root>,
+    declaration: Position<DelimitedSequenceDeclarationRole, Root>,
+}
+
+impl<Root: Clone> GenericDelimitedContentRecord<Root> {
+    fn new(keyword: EncodedId<Root>) -> Self {
+        let content = OrderedSequence::try_new::<DelimitedSequenceKeywordRole>()
+            .and_then(OrderedSequence::then::<DelimitedSequenceDeclarationRole>)
+            .expect("two content positions");
+        let content = Position::try_new(SharedDescriptor::OrderedSequence(content))
+            .expect("delimited content");
+        Self {
+            root: Position::try_new(SharedDescriptor::Delimited {
+                boundary: BRACE,
+                content: content.role(),
+            })
+            .expect("delimited root"),
+            content,
+            keyword: Position::try_new(SharedDescriptor::Literal(keyword))
+                .expect("content keyword"),
+            declaration: Position::try_new(SharedDescriptor::Declaration(
+                AtomDescriptor::any_case(),
+            ))
+            .expect("content declaration"),
+        }
+    }
+}
+
+struct GenericDelimitedContentView<'record, Root> {
+    record: &'record GenericDelimitedContentRecord<Root>,
+}
+
+impl<Root> BorrowedFieldView<Root> for GenericDelimitedContentView<'_, Root> {
+    fn expose<Visitor: FieldVisitor<Root>>(&self, visitor: &mut Visitor) {
+        visitor.field(&self.record.root);
+        visitor.field(&self.record.content);
+        visitor.field(&self.record.keyword);
+        visitor.field(&self.record.declaration);
+    }
+}
+
+impl<Root> StructureRecord<Root> for GenericDelimitedContentRecord<Root> {
+    type View<'record>
+        = GenericDelimitedContentView<'record, Root>
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.root.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        GenericDelimitedContentView { record: self }
     }
 }
 
@@ -873,6 +974,134 @@ fn ordered_sequence_decodes_and_encodes_mixed_lexical_positions() {
         evaluator
             .decode_text(&expected, "Widget pub", &bindings)
             .is_err()
+    );
+}
+
+#[test]
+fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declaration() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[8, 2]);
+    let keyword = encoded(FirstFixtureRoot::Universal, &[8, 3]);
+    let record = DerivedFutureRecord::new(keyword.clone());
+    let entry = StructuralEntry::new(
+        expected.clone(),
+        vec![ConstructorCodec::new(
+            EncodedConstructorId::under(&expected, 1),
+            vec![AcceptedDecodeForm::new(
+                DecodeFormId::new(1),
+                record.clone(),
+            )],
+            record,
+        )],
+    );
+    let profile = profile();
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"derived position alternation"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"inline application alternation"),
+            discovery(),
+            rendering(),
+            vec![entry],
+        ),
+        &profile,
+    )
+    .expect("derived descriptor table");
+    let target = encoded(FirstFixtureRoot::Universal, &[8, 4]);
+    let declaration = encoded(FirstFixtureRoot::Universal, &[8, 5]);
+    let mut bindings = Bindings::default();
+    bindings.spelling(&keyword, "Realize");
+    bindings.reference(8, 14, "target", &target);
+    bindings.declaration(0, 6, "Widget", &declaration);
+
+    let evaluator = StructuralEvaluator::new(&table).expect("shared evaluator");
+    let future = evaluator
+        .decode_text(&expected, "Realize.target", &bindings)
+        .expect("dotted future");
+    assert!(matches!(
+        future.field::<DerivedFutureRole>(),
+        Some(FieldValue::Application { head, payload })
+            if matches!(head.as_ref(), FieldValue::Literal(found) if found == &keyword)
+                && matches!(payload.as_ref(), FieldValue::Reference(found) if found.encoded_id() == &target)
+    ));
+    assert_eq!(bindings.declaration_queries.get(), 0);
+    assert_eq!(bindings.reference_queries.get(), 1);
+    assert_eq!(
+        evaluator
+            .encode_text(&expected, &future, &bindings)
+            .expect("future branch encodes through the same alternation"),
+        "Realize.target"
+    );
+
+    let literal = evaluator
+        .decode_text(&expected, "Widget", &bindings)
+        .expect("literal declaration branch");
+    assert!(matches!(
+        literal.field::<DerivedFutureRole>(),
+        Some(FieldValue::Declaration(found)) if found.encoded_id() == &declaration
+    ));
+    assert_eq!(bindings.declaration_queries.get(), 1);
+    assert_eq!(bindings.reference_queries.get(), 1);
+    assert_eq!(
+        evaluator
+            .encode_text(&expected, &literal, &bindings)
+            .expect("literal branch encodes through the same alternation"),
+        "Widget"
+    );
+}
+
+#[test]
+fn delimited_content_can_be_a_fixed_ordered_sequence() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[8, 6]);
+    let keyword = encoded(FirstFixtureRoot::Universal, &[8, 7]);
+    let record = GenericDelimitedContentRecord::new(keyword.clone());
+    let constructor = EncodedConstructorId::under(&expected, 1);
+    let entry = StructuralEntry::new(
+        expected.clone(),
+        vec![ConstructorCodec::new(
+            constructor,
+            vec![AcceptedDecodeForm::new(
+                DecodeFormId::new(1),
+                record.clone(),
+            )],
+            record,
+        )],
+    );
+    let profile = profile();
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"generic delimited content"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"ordered delimited content"),
+            product_discovery(),
+            product_rendering(),
+            vec![entry],
+        ),
+        &profile,
+    )
+    .expect("generic delimited table");
+    let declaration = encoded(FirstFixtureRoot::Universal, &[8, 8]);
+    let mut bindings = Bindings::default();
+    bindings.spelling(&keyword, "Public");
+    bindings.declaration(8, 14, "Widget", &declaration);
+
+    let decoded = StructuralEvaluator::new(&table)
+        .expect("shared evaluator")
+        .decode_text(&expected, "{Public Widget}", &bindings)
+        .expect("ordered sequence inside boundary");
+    assert!(matches!(
+        decoded.field::<DelimitedSequenceContentRole>(),
+        Some(FieldValue::OrderedProduct)
+    ));
+    assert!(matches!(
+        decoded.field::<DelimitedSequenceDeclarationRole>(),
+        Some(FieldValue::Declaration(found)) if found.encoded_id() == &declaration
+    ));
+    assert_eq!(
+        StructuralEvaluator::new(&table)
+            .expect("shared evaluator")
+            .encode_text(&expected, &decoded, &bindings)
+            .expect("generic delimited content encodes"),
+        "{Public Widget}"
     );
 }
 

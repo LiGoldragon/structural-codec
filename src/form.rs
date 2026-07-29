@@ -194,6 +194,26 @@ pub enum SharedDescriptor<Root> {
         head: StableRoleId,
         payload: StableRoleId,
     },
+    /// A nested application whose head and payload are local to this
+    /// descriptor rather than linked sibling fields.
+    ///
+    /// This is the generic substrate for mechanically derived grammars such
+    /// as Template(X): a widened landing position can admit a typed dotted
+    /// construct without manufacturing a new Rust record or stable role for
+    /// that source-language position.
+    InlineApplication {
+        operator: TriggerIdentifier,
+        #[rkyv(omit_bounds)]
+        head: Box<SharedDescriptor<Root>>,
+        #[rkyv(omit_bounds)]
+        payload: Box<SharedDescriptor<Root>>,
+    },
+    /// A closed, ordered alternation between descriptors at one typed
+    /// position.
+    ///
+    /// Alternatives are data in the addressed table and are evaluated by the
+    /// shared structural evaluator. They are not parser callbacks.
+    Alternation(#[rkyv(omit_bounds)] Vec<SharedDescriptor<Root>>),
     Delimited {
         boundary: TriggerIdentifier,
         content: StableRoleId,

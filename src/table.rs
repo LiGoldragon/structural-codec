@@ -187,7 +187,7 @@ impl HashDomain for StructuralTableDomain {
     fn separation() -> DomainSeparation {
         DomainSeparation::Contextual {
             context: "structural-codec 2026 addressed structural table",
-            layout: LayoutVersion::new(11),
+            layout: LayoutVersion::new(12),
         }
     }
 }
@@ -477,6 +477,30 @@ where
                         .get(role)
                         .ok_or(TableError::MissingRole { role: *role })?;
                     Self::validate_descriptor(child, roles, profile, block_discovery)?;
+                }
+            }
+            SharedDescriptor::InlineApplication {
+                operator,
+                head,
+                payload,
+            } => {
+                if !matches!(
+                    profile.definition(*operator)?.trigger,
+                    Trigger::Application { .. } | Trigger::Punctuation { .. }
+                ) {
+                    return Err(TableError::WrongTriggerKind {
+                        identifier: *operator,
+                    });
+                }
+                Self::validate_descriptor(head, roles, profile, block_discovery)?;
+                Self::validate_descriptor(payload, roles, profile, block_discovery)?;
+            }
+            SharedDescriptor::Alternation(alternatives) => {
+                if alternatives.is_empty() {
+                    return Err(TableError::EmptyAlternation);
+                }
+                for alternative in alternatives {
+                    Self::validate_descriptor(alternative, roles, profile, block_discovery)?;
                 }
             }
             SharedDescriptor::Delimited { boundary, content }

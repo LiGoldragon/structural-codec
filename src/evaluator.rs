@@ -816,11 +816,75 @@ where
                     payload: Rc::new(payload),
                 })
             }
+            SharedDescriptor::InlineApplication {
+                operator,
+                head,
+                payload,
+            } => {
+                let operator_text = self.operator_text(*operator)?;
+                let head = self.decode_descriptor(
+                    head,
+                    input,
+                    state,
+                    bindings,
+                    active,
+                    DecodeScope {
+                        continuation: DecodeContinuation::Before(&operator_text),
+                        structural_stops: scope.structural_stops,
+                    },
+                )?;
+                input.consume_operator(self, *operator)?;
+                let payload =
+                    self.decode_descriptor(payload, input, state, bindings, active, scope)?;
+                Ok(DraftFieldValue::Application {
+                    head: Rc::new(head),
+                    payload: Rc::new(payload),
+                })
+            }
+            SharedDescriptor::Alternation(alternatives) => {
+                for alternative in alternatives {
+                    let mut candidate = input.clone();
+                    let mut candidate_state = state.clone();
+                    match self.decode_descriptor(
+                        alternative,
+                        &mut candidate,
+                        &mut candidate_state,
+                        bindings,
+                        active,
+                        scope,
+                    ) {
+                        Ok(value) => {
+                            *input = candidate;
+                            *state = candidate_state;
+                            return Ok(value);
+                        }
+                        Err(error) if error.is_structural_non_match() => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(DecodeError::NoDescriptorAlternative)
+            }
             SharedDescriptor::Delimited { boundary, content }
             | SharedDescriptor::ItemBoundary { boundary, content } => {
                 let mut interior = input.take_boundary(self, *boundary)?;
-                let value =
-                    self.decode_repeated_role(*content, &mut interior, state, bindings, active)?;
+                let value = if matches!(
+                    state.descriptor(*content)?,
+                    SharedDescriptor::Repeated { .. }
+                ) {
+                    self.decode_repeated_role(*content, &mut interior, state, bindings, active)?
+                } else {
+                    self.decode_role(
+                        *content,
+                        &mut interior,
+                        state,
+                        bindings,
+                        active,
+                        DecodeScope {
+                            continuation: DecodeContinuation::Bound,
+                            structural_stops: &[],
+                        },
+                    )?
+                };
                 if !interior.finish(self)? {
                     return Err(DecodeError::RepetitionCardinality { found: 0 });
                 }
@@ -1169,6 +1233,16 @@ where
     ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
         let atom = Atom::new(body);
         match descriptor {
+            SharedDescriptor::Alternation(alternatives) => {
+                for alternative in alternatives {
+                    match self.decode_carrier_content(alternative, body, bound, bindings) {
+                        Ok(value) => return Ok(value),
+                        Err(error) if error.is_structural_non_match() => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(DecodeError::NoDescriptorAlternative)
+            }
             SharedDescriptor::Declaration(form) => {
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
@@ -1344,6 +1418,51 @@ where
                 self.encode_role(*payload, descriptors, mirror, resolver, context)?,
             )),
             (
+                SharedDescriptor::InlineApplication {
+                    operator,
+                    head,
+                    payload,
+                },
+                FieldValue::Application {
+                    head: value_head,
+                    payload: value_payload,
+                },
+            ) => Ok(format!(
+                "{}{}{}",
+                self.encode_descriptor(head, value_head, descriptors, mirror, resolver, context)?,
+                self.operator_text_encode(*operator)?,
+                self.encode_descriptor(
+                    payload,
+                    value_payload,
+                    descriptors,
+                    mirror,
+                    resolver,
+                    context
+                )?,
+            )),
+            (SharedDescriptor::Alternation(alternatives), value) => {
+                for alternative in alternatives {
+                    match self.encode_descriptor(
+                        alternative,
+                        value,
+                        descriptors,
+                        mirror,
+                        resolver,
+                        context,
+                    ) {
+                        Ok(rendered) => return Ok(rendered),
+                        Err(
+                            EncodeError::ShapeMismatch
+                            | EncodeError::LiteralMismatch
+                            | EncodeError::DelegationPayloadMismatch { .. }
+                            | EncodeError::NoDescriptorAlternative,
+                        ) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(EncodeError::NoDescriptorAlternative)
+            }
+            (
                 SharedDescriptor::Delimited { boundary, content }
                 | SharedDescriptor::ItemBoundary { boundary, content },
                 FieldValue::Delimited(_),
@@ -1366,18 +1485,21 @@ where
                 else {
                     return Err(EncodeError::ShapeMismatch);
                 };
-                Ok(format!(
-                    "{}{}{}",
-                    opening,
+                let content = if matches!(
+                    descriptors.get(content),
+                    Some(SharedDescriptor::Repeated { .. })
+                ) {
                     self.encode_repeated_role(
                         *content,
                         descriptors,
                         mirror,
                         resolver,
-                        child_context
-                    )?,
-                    closing,
-                ))
+                        child_context,
+                    )?
+                } else {
+                    self.encode_role(*content, descriptors, mirror, resolver, child_context)?
+                };
+                Ok(format!("{}{}{}", opening, content, closing,))
             }
             (SharedDescriptor::Carrier { carrier, content }, FieldValue::Carrier(value)) => {
                 let body =

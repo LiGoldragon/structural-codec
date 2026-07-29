@@ -112,6 +112,8 @@ pub enum DecodeError<Root> {
     BoundaryMismatch { boundary: TriggerIdentifier },
     #[error("no accepted decode form matched under expected type {core_type:?}")]
     NoAlternative { core_type: EncodedTypeId<Root> },
+    #[error("no branch of a descriptor alternation matched")]
+    NoDescriptorAlternative,
     #[error("source did not contain exactly one root object")]
     RootObjectCount,
 }
@@ -131,6 +133,7 @@ impl<Root> DecodeError<Root> {
                 | Self::ProductArityMismatch { .. }
                 | Self::ProductPositionMismatch { .. }
                 | Self::NoAlternative { .. }
+                | Self::NoDescriptorAlternative
         )
     }
 }
@@ -161,6 +164,8 @@ pub enum EncodeError<Root> {
     MissingRole { role: StableRoleId },
     #[error("a value spelling would not decode canonically")]
     NonCanonicalSpelling,
+    #[error("no branch of a descriptor alternation accepted the value")]
+    NoDescriptorAlternative,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -178,6 +183,8 @@ pub enum TableError<Root> {
     },
     #[error("the table contains the same encoded type more than once")]
     DuplicateEncodedType { entry: EncodedTypeId<Root> },
+    #[error("a descriptor alternation must contain at least one branch")]
+    EmptyAlternation,
     #[error("entry {entry:?} has no constructors")]
     EmptyEntry { entry: EncodedTypeId<Root> },
     #[error("entry {entry:?} repeats constructor identity {constructor:?}")]

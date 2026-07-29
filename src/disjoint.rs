@@ -73,6 +73,9 @@ fn outer<'a, Root>(
                 ))?,
             ))
         }
+        SharedDescriptor::InlineApplication { head, payload, .. } => {
+            Ok(Outer::Application(head, payload))
+        }
         SharedDescriptor::Delimited { boundary, .. }
         | SharedDescriptor::ItemBoundary { boundary, .. } => Ok(Outer::Boundary(*boundary)),
         SharedDescriptor::Carrier { carrier, .. } => Ok(Outer::Carrier(*carrier)),
@@ -80,6 +83,9 @@ fn outer<'a, Root>(
         SharedDescriptor::Leaf(_)
         | SharedDescriptor::Repeated { .. }
         | SharedDescriptor::OrderedProduct(_) => Ok(Outer::Opaque),
+        SharedDescriptor::Alternation(_) => {
+            unreachable!("alternations distribute before outer proof")
+        }
         SharedDescriptor::Delegate { .. } => unreachable!("delegates expand before outer proof"),
     }
 }
@@ -181,6 +187,35 @@ where
     Root: Clone + Ord,
     Record: StructureRecord<Root>,
 {
+    if let SharedDescriptor::Alternation(alternatives) = left {
+        for alternative in alternatives {
+            let mut branch_active = active.clone();
+            prove(
+                alternative,
+                left_roles,
+                right,
+                right_roles,
+                entries,
+                &mut branch_active,
+            )?;
+        }
+        return Ok(());
+    }
+    if let SharedDescriptor::Alternation(alternatives) = right {
+        for alternative in alternatives {
+            let mut branch_active = active.clone();
+            prove(
+                left,
+                left_roles,
+                alternative,
+                right_roles,
+                entries,
+                &mut branch_active,
+            )?;
+        }
+        return Ok(());
+    }
+
     if let (
         SharedDescriptor::Delegate {
             payload: Some(left_payload),
@@ -372,9 +407,13 @@ fn directly_guaranteed_nonempty<Root>(
         | SharedDescriptor::Literal(_)
         | SharedDescriptor::Leaf(_)
         | SharedDescriptor::Application { .. }
+        | SharedDescriptor::InlineApplication { .. }
         | SharedDescriptor::Delimited { .. }
         | SharedDescriptor::Carrier { .. }
         | SharedDescriptor::ItemBoundary { .. } => true,
+        SharedDescriptor::Alternation(alternatives) => alternatives
+            .iter()
+            .all(|alternative| directly_guaranteed_nonempty(alternative, roles)),
         SharedDescriptor::Repeated {
             minimum, element, ..
         } => *minimum > 0 && directly_guaranteed_nonempty(element, roles),

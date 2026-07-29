@@ -379,6 +379,8 @@ fn descriptor_requires_landing<Root>(descriptor: &SharedDescriptor<Root>) -> boo
         | SharedDescriptor::OrderedProduct(_)
         | SharedDescriptor::OrderedSequence(_)
         | SharedDescriptor::Application { .. }
+        | SharedDescriptor::InlineApplication { .. }
+        | SharedDescriptor::Alternation(_)
         | SharedDescriptor::Delimited { .. }
         | SharedDescriptor::ItemBoundary { .. } => false,
     }
@@ -506,6 +508,8 @@ pub enum DescriptorKind {
     OrderedProduct,
     OrderedSequence,
     Application,
+    InlineApplication,
+    Alternation,
     Delimited,
     Carrier,
     Repeated,
@@ -523,6 +527,8 @@ impl DescriptorKind {
             SharedDescriptor::OrderedProduct(_) => Self::OrderedProduct,
             SharedDescriptor::OrderedSequence(_) => Self::OrderedSequence,
             SharedDescriptor::Application { .. } => Self::Application,
+            SharedDescriptor::InlineApplication { .. } => Self::InlineApplication,
+            SharedDescriptor::Alternation(_) => Self::Alternation,
             SharedDescriptor::Delimited { .. } => Self::Delimited,
             SharedDescriptor::Carrier { .. } => Self::Carrier,
             SharedDescriptor::Repeated { .. } => Self::Repeated,
