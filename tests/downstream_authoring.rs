@@ -1158,6 +1158,11 @@ fn reserved_application_is_disjoint_from_an_excluding_reference_application() {
         reference_evaluator.decode_text(&reference_only, "Realize", &excluded),
         Err(DecodeError::NoAlternative { .. })
     ));
+    assert_eq!(
+        excluded.reference_queries.get(),
+        0,
+        "reserved identities refuse before lookup-only reference resolution"
+    );
 }
 
 #[test]

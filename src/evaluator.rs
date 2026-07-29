@@ -735,6 +735,13 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
+                if excluded.iter().any(|encoded_id| {
+                    bindings
+                        .resolve(encoded_id)
+                        .is_some_and(|name| name.as_str() == atom.text())
+                }) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
+                }
                 let assignment = bindings
                     .declaration_assignment(NameOccurrence::new(atom.text(), bound))
                     .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
@@ -770,6 +777,13 @@ where
                 )?;
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
+                }
+                if excluded.iter().any(|encoded_id| {
+                    bindings
+                        .resolve(encoded_id)
+                        .is_some_and(|name| name.as_str() == atom.text())
+                }) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 let reference = bindings
                     .reference_resolution(NameOccurrence::new(atom.text(), bound))
@@ -1302,6 +1316,13 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
+                if excluded.iter().any(|encoded_id| {
+                    bindings
+                        .resolve(encoded_id)
+                        .is_some_and(|name| name.as_str() == body)
+                }) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
+                }
                 let assignment = bindings
                     .declaration_assignment(NameOccurrence::new(body, bound))
                     .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
@@ -1327,6 +1348,13 @@ where
             } => {
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
+                }
+                if excluded.iter().any(|encoded_id| {
+                    bindings
+                        .resolve(encoded_id)
+                        .is_some_and(|name| name.as_str() == body)
+                }) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 let reference = bindings
                     .reference_resolution(NameOccurrence::new(body, bound))
