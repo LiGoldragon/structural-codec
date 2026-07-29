@@ -161,6 +161,7 @@ fixture_role!(AmbiguousSequenceRootRole, 963);
 fixture_role!(AmbiguousSequenceRepeatedRole, 964);
 fixture_role!(AmbiguousSequenceRequiredRole, 965);
 fixture_role!(AmbiguousSequenceLiteralRole, 966);
+fixture_role!(RejectedCandidateRole, 967);
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct SixSlotDocumentRecord<Root> {
@@ -378,6 +379,50 @@ impl<Root> StructureRecord<Root> for DerivedFutureRecord<Root> {
 
     fn fields(&self) -> Self::View<'_> {
         FieldLink::new(&self.future_or_value, FieldEnd)
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+struct RejectedCandidateRecord<Root> {
+    selected: Position<RejectedCandidateRole, Root>,
+}
+
+impl<Root: Clone> RejectedCandidateRecord<Root> {
+    fn new(
+        rejected_payload: EncodedId<Root>,
+        selected_head: EncodedId<Root>,
+        selected_payload: EncodedId<Root>,
+    ) -> Self {
+        Self {
+            selected: Position::try_new(SharedDescriptor::Alternation(vec![
+                SharedDescriptor::InlineApplication {
+                    operator: APPLICATION,
+                    head: Box::new(SharedDescriptor::Declaration(AtomDescriptor::any_case())),
+                    payload: Box::new(SharedDescriptor::Literal(rejected_payload)),
+                },
+                SharedDescriptor::InlineApplication {
+                    operator: APPLICATION,
+                    head: Box::new(SharedDescriptor::Literal(selected_head)),
+                    payload: Box::new(SharedDescriptor::Literal(selected_payload)),
+                },
+            ]))
+            .expect("rejected candidate role"),
+        }
+    }
+}
+
+impl<Root> StructureRecord<Root> for RejectedCandidateRecord<Root> {
+    type View<'record>
+        = FieldLink<'record, RejectedCandidateRole, Root, FieldEnd>
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.selected.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        FieldLink::new(&self.selected, FieldEnd)
     }
 }
 
@@ -1228,6 +1273,70 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
         1,
         "planning never calls the reference-resolution boundary"
     );
+}
+
+#[test]
+fn rejected_alternation_candidate_cannot_leak_its_unique_planned_declaration() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[8, 20]);
+    let rejected_payload = encoded(FirstFixtureRoot::Universal, &[8, 21]);
+    let selected_head = encoded(FirstFixtureRoot::Universal, &[8, 22]);
+    let selected_payload = encoded(FirstFixtureRoot::Universal, &[8, 23]);
+    let record = RejectedCandidateRecord::new(
+        rejected_payload.clone(),
+        selected_head.clone(),
+        selected_payload.clone(),
+    );
+    let entry = StructuralEntry::new(
+        expected.clone(),
+        vec![ConstructorCodec::new(
+            EncodedConstructorId::under(&expected, 1),
+            vec![AcceptedDecodeForm::new(
+                DecodeFormId::new(1),
+                record.clone(),
+            )],
+            record,
+        )],
+    );
+    let profile = profile();
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"rejected occurrence isolation"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"alternation candidate rollback"),
+            discovery(),
+            rendering(),
+            vec![entry],
+        ),
+        &profile,
+    )
+    .expect("rejected-candidate table");
+    let mut bindings = Bindings::default();
+    bindings.spelling(&rejected_payload, "Bad");
+    bindings.spelling(&selected_head, "Unique");
+    bindings.spelling(&selected_payload, "Good");
+
+    let plan = StructuralEvaluator::new(&table)
+        .expect("shared evaluator")
+        .plan_text(&expected, "Unique.Good", &bindings)
+        .expect("second alternation candidate is selected");
+
+    assert!(matches!(
+        plan.field::<RejectedCandidateRole>(),
+        Some(PlannedFieldValue::Application { head, payload })
+            if matches!(
+                head.as_ref(),
+                PlannedFieldValue::Literal(found) if found == &selected_head
+            ) && matches!(
+                payload.as_ref(),
+                PlannedFieldValue::Literal(found) if found == &selected_payload
+            )
+    ));
+    assert_eq!(
+        bindings.declaration_queries.get(),
+        0,
+        "the rejected candidate's Unique declaration is absent from the selected plan"
+    );
+    assert_eq!(bindings.reference_queries.get(), 0);
 }
 
 #[test]
