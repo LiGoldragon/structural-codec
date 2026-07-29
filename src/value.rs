@@ -170,6 +170,15 @@ impl<Root> StructuralValue<Root> {
     pub fn field<Role: FieldRole>(&self) -> Option<&FieldValue<Root>> {
         self.fields.value::<Role>()
     }
+
+    /// Read one decoded value by the stable role supplied by a verified,
+    /// declaration-indexed consumer.
+    ///
+    /// This is deliberately read-only. Dynamic authoring still has no route
+    /// around [`StructuralValueRecord::insert`]'s typed role requirement.
+    pub fn field_by_role(&self, role: StableRoleId) -> Option<&FieldValue<Root>> {
+        self.fields.value_by_stable_role(role)
+    }
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]

@@ -982,6 +982,7 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
     let expected = type_id(FirstFixtureRoot::Universal, &[8, 2]);
     let keyword = encoded(FirstFixtureRoot::Universal, &[8, 3]);
     let record = DerivedFutureRecord::new(keyword.clone());
+    let derived_role = record.future_or_value.role();
     let entry = StructuralEntry::new(
         expected.clone(),
         vec![ConstructorCodec::new(
@@ -1023,6 +1024,11 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
             if matches!(head.as_ref(), FieldValue::Literal(found) if found == &keyword)
                 && matches!(payload.as_ref(), FieldValue::Reference(found) if found.encoded_id() == &target)
     ));
+    assert_eq!(
+        future.field_by_role(derived_role),
+        future.field::<DerivedFutureRole>(),
+        "verified declaration-indexed consumers can read the same role without a Rust type"
+    );
     assert_eq!(bindings.declaration_queries.get(), 0);
     assert_eq!(bindings.reference_queries.get(), 1);
     assert_eq!(
