@@ -187,7 +187,7 @@ impl HashDomain for StructuralTableDomain {
     fn separation() -> DomainSeparation {
         DomainSeparation::Contextual {
             context: "structural-codec 2026 addressed structural table",
-            layout: LayoutVersion::new(12),
+            layout: LayoutVersion::new(13),
         }
     }
 }
@@ -542,7 +542,10 @@ where
             SharedDescriptor::Repeated { element, .. } => {
                 Self::validate_descriptor(element, roles, profile, block_discovery)?
             }
-            SharedDescriptor::Declaration(atom) | SharedDescriptor::Reference(atom) => {
+            SharedDescriptor::Declaration(atom)
+            | SharedDescriptor::Reference(atom)
+            | SharedDescriptor::DeclarationExcluding { atom, .. }
+            | SharedDescriptor::ReferenceExcluding { atom, .. } => {
                 if let Some(trigger) = atom.trigger {
                     if !matches!(
                         profile.definition(trigger)?.trigger,

@@ -723,6 +723,27 @@ where
                 self.verify_bound_spelling(bindings, assignment.encoded_id(), atom.text(), bound)?;
                 Ok(DraftFieldValue::Declaration(assignment))
             }
+            SharedDescriptor::DeclarationExcluding {
+                atom: form,
+                excluded,
+            } => {
+                let (atom, bound) = self.take_source_atom(
+                    input,
+                    scope.continuation.terminator(),
+                    scope.structural_stops,
+                )?;
+                if !form.accepts(&atom) {
+                    return Err(DecodeError::CaseMismatch);
+                }
+                let assignment = bindings
+                    .declaration_assignment(NameOccurrence::new(atom.text(), bound))
+                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
+                self.verify_bound_spelling(bindings, assignment.encoded_id(), atom.text(), bound)?;
+                if excluded.contains(assignment.encoded_id()) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
+                }
+                Ok(DraftFieldValue::Declaration(assignment))
+            }
             SharedDescriptor::Reference(form) => {
                 let (atom, bound) = self.take_source_atom(
                     input,
@@ -736,6 +757,27 @@ where
                     .reference_resolution(NameOccurrence::new(atom.text(), bound))
                     .ok_or(DecodeError::UnresolvedReference { bound })?;
                 self.verify_bound_spelling(bindings, reference.encoded_id(), atom.text(), bound)?;
+                Ok(DraftFieldValue::Reference(reference))
+            }
+            SharedDescriptor::ReferenceExcluding {
+                atom: form,
+                excluded,
+            } => {
+                let (atom, bound) = self.take_source_atom(
+                    input,
+                    scope.continuation.terminator(),
+                    scope.structural_stops,
+                )?;
+                if !form.accepts(&atom) {
+                    return Err(DecodeError::CaseMismatch);
+                }
+                let reference = bindings
+                    .reference_resolution(NameOccurrence::new(atom.text(), bound))
+                    .ok_or(DecodeError::UnresolvedReference { bound })?;
+                self.verify_bound_spelling(bindings, reference.encoded_id(), atom.text(), bound)?;
+                if excluded.contains(reference.encoded_id()) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
+                }
                 Ok(DraftFieldValue::Reference(reference))
             }
             SharedDescriptor::Literal(identifier) => {
@@ -1253,6 +1295,22 @@ where
                 self.verify_bound_spelling(bindings, assignment.encoded_id(), body, bound)?;
                 Ok(DraftFieldValue::Declaration(assignment))
             }
+            SharedDescriptor::DeclarationExcluding {
+                atom: form,
+                excluded,
+            } => {
+                if !form.accepts(&atom) {
+                    return Err(DecodeError::CaseMismatch);
+                }
+                let assignment = bindings
+                    .declaration_assignment(NameOccurrence::new(body, bound))
+                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
+                self.verify_bound_spelling(bindings, assignment.encoded_id(), body, bound)?;
+                if excluded.contains(assignment.encoded_id()) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
+                }
+                Ok(DraftFieldValue::Declaration(assignment))
+            }
             SharedDescriptor::Reference(form) => {
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
@@ -1261,6 +1319,22 @@ where
                     .reference_resolution(NameOccurrence::new(body, bound))
                     .ok_or(DecodeError::UnresolvedReference { bound })?;
                 self.verify_bound_spelling(bindings, reference.encoded_id(), body, bound)?;
+                Ok(DraftFieldValue::Reference(reference))
+            }
+            SharedDescriptor::ReferenceExcluding {
+                atom: form,
+                excluded,
+            } => {
+                if !form.accepts(&atom) {
+                    return Err(DecodeError::CaseMismatch);
+                }
+                let reference = bindings
+                    .reference_resolution(NameOccurrence::new(body, bound))
+                    .ok_or(DecodeError::UnresolvedReference { bound })?;
+                self.verify_bound_spelling(bindings, reference.encoded_id(), body, bound)?;
+                if excluded.contains(reference.encoded_id()) {
+                    return Err(DecodeError::ExcludedNameIdentity { bound });
+                }
                 Ok(DraftFieldValue::Reference(reference))
             }
             SharedDescriptor::Literal(identifier) => {
@@ -1364,7 +1438,25 @@ where
             (SharedDescriptor::Declaration(_), FieldValue::Declaration(assignment)) => {
                 Self::resolve_text(resolver, assignment.encoded_id())
             }
+            (
+                SharedDescriptor::DeclarationExcluding { excluded, .. },
+                FieldValue::Declaration(assignment),
+            ) => {
+                if excluded.contains(assignment.encoded_id()) {
+                    return Err(EncodeError::ExcludedNameIdentity);
+                }
+                Self::resolve_text(resolver, assignment.encoded_id())
+            }
             (SharedDescriptor::Reference(_), FieldValue::Reference(reference)) => {
+                Self::resolve_text(resolver, reference.encoded_id())
+            }
+            (
+                SharedDescriptor::ReferenceExcluding { excluded, .. },
+                FieldValue::Reference(reference),
+            ) => {
+                if excluded.contains(reference.encoded_id()) {
+                    return Err(EncodeError::ExcludedNameIdentity);
+                }
                 Self::resolve_text(resolver, reference.encoded_id())
             }
             (SharedDescriptor::Literal(expected), FieldValue::Literal(identifier))
@@ -1454,6 +1546,7 @@ where
                         Err(
                             EncodeError::ShapeMismatch
                             | EncodeError::LiteralMismatch
+                            | EncodeError::ExcludedNameIdentity
                             | EncodeError::DelegationPayloadMismatch { .. }
                             | EncodeError::NoDescriptorAlternative,
                         ) => {}

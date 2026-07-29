@@ -82,6 +82,8 @@ pub enum DecodeError<Root> {
     UnresolvedReference { bound: SourceBound },
     #[error("the supplied encoded ID resolves to a different spelling at {bound:?}")]
     NameBindingMismatch { bound: SourceBound },
+    #[error("the resolved encoded identity is reserved at {bound:?}")]
+    ExcludedNameIdentity { bound: SourceBound },
     #[error("the encoded name has no spelling in the supplied resolver")]
     UnknownEncodedName {
         encoded_id: name_table::EncodedId<Root>,
@@ -125,6 +127,7 @@ impl<Root> DecodeError<Root> {
             Self::BlockKindMismatch { .. }
                 | Self::CaseMismatch
                 | Self::LiteralMismatch
+                | Self::ExcludedNameIdentity { .. }
                 | Self::DelegationPayloadMismatch { .. }
                 | Self::RepetitionCardinality { .. }
                 | Self::LeafNotFlattenable
@@ -152,6 +155,8 @@ pub enum EncodeError<Root> {
     ShapeMismatch,
     #[error("the encoded atom did not match the canonical literal")]
     LiteralMismatch,
+    #[error("the encoded identity is reserved at this name position")]
+    ExcludedNameIdentity,
     #[error("the encoded name has no spelling in the supplied resolver")]
     UnknownEncodedName {
         encoded_id: name_table::EncodedId<Root>,

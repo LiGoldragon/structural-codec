@@ -177,6 +177,25 @@ pub enum SharedDescriptor<Root> {
     Declaration(AtomDescriptor),
     /// A reference spelling resolved by lookup-only caller state.
     Reference(AtomDescriptor),
+    /// A declaration whose translator-supplied identity must not be one of the
+    /// reserved identities.
+    ///
+    /// Mechanically derived grammars use this to retain an original name
+    /// branch beside reserved keyword applications without matching the
+    /// reserved words as ordinary declarations.
+    DeclarationExcluding {
+        atom: AtomDescriptor,
+        excluded: Vec<EncodedId<Root>>,
+    },
+    /// A lookup-only reference whose resolved identity must not be one of the
+    /// reserved identities.
+    ///
+    /// Exclusion is checked on the encoded identity after lookup; no spelling
+    /// comparison or allocation path is introduced.
+    ReferenceExcluding {
+        atom: AtomDescriptor,
+        excluded: Vec<EncodedId<Root>>,
+    },
     /// A fixed vocabulary word identified by its complete encoded-ID chain.
     Literal(EncodedId<Root>),
     Leaf(LeafCodec),

@@ -32,7 +32,10 @@ fn fields<Root: Clone, Record: StructureRecord<Root>>(
 }
 
 enum Outer<'a, Root> {
-    Named(Option<raw_discovery::AtomCase>),
+    Named(
+        Option<raw_discovery::AtomCase>,
+        &'a [name_table::EncodedId<Root>],
+    ),
     Literal(&'a name_table::EncodedId<Root>),
     Application(&'a SharedDescriptor<Root>, &'a SharedDescriptor<Root>),
     Boundary(raw_discovery::TriggerIdentifier),
@@ -58,7 +61,11 @@ fn outer<'a, Root>(
 ) -> Result<Outer<'a, Root>, ProofFailure<Root>> {
     match descriptor {
         SharedDescriptor::Declaration(atom) | SharedDescriptor::Reference(atom) => {
-            Ok(Outer::Named(atom.case))
+            Ok(Outer::Named(atom.case, &[]))
+        }
+        SharedDescriptor::DeclarationExcluding { atom, excluded }
+        | SharedDescriptor::ReferenceExcluding { atom, excluded } => {
+            Ok(Outer::Named(atom.case, excluded))
         }
         SharedDescriptor::Literal(identifier) => Ok(Outer::Literal(identifier)),
         SharedDescriptor::Application { head, payload, .. } => {
@@ -251,21 +258,26 @@ where
             (Outer::Carrier(left), Outer::Carrier(right)) if left != right => Ok(()),
             (Outer::Carrier(_), Outer::Carrier(_)) => reason(DisjointnessReason::SharedBoundary),
             (Outer::Carrier(_), _) | (_, Outer::Carrier(_)) => Ok(()),
-            (Outer::Named(left), Outer::Named(right)) => match (left, right) {
+            (Outer::Named(left, _), Outer::Named(right, _)) => match (left, right) {
                 (Some(left), Some(right)) if left != right => Ok(()),
                 _ => reason(DisjointnessReason::OverlappingAtomCase),
             },
             (Outer::Literal(left), Outer::Literal(right)) if left != right => Ok(()),
             (Outer::Literal(_), Outer::Literal(_)) => reason(DisjointnessReason::SameLiteral),
-            (Outer::Named(_), Outer::Literal(_)) | (Outer::Literal(_), Outer::Named(_)) => {
-                reason(DisjointnessReason::LiteralMayMatchNameAtom)
+            (Outer::Named(_, excluded), Outer::Literal(literal))
+            | (Outer::Literal(literal), Outer::Named(_, excluded)) => {
+                if excluded.contains(literal) {
+                    Ok(())
+                } else {
+                    reason(DisjointnessReason::LiteralMayMatchNameAtom)
+                }
             }
-            (Outer::Application(_, _), Outer::Named(_))
-            | (Outer::Named(_), Outer::Application(_, _))
+            (Outer::Application(_, _), Outer::Named(_, _))
+            | (Outer::Named(_, _), Outer::Application(_, _))
             | (Outer::Application(_, _), Outer::Literal(_))
             | (Outer::Literal(_), Outer::Application(_, _))
-            | (Outer::Boundary(_), Outer::Named(_))
-            | (Outer::Named(_), Outer::Boundary(_))
+            | (Outer::Boundary(_), Outer::Named(_, _))
+            | (Outer::Named(_, _), Outer::Boundary(_))
             | (Outer::Boundary(_), Outer::Literal(_))
             | (Outer::Literal(_), Outer::Boundary(_))
             | (Outer::Application(_, _), Outer::Boundary(_))
@@ -308,7 +320,7 @@ where
             }
             (
                 Outer::Sequence(sequence),
-                Outer::Named(_) | Outer::Literal(_) | Outer::Boundary(_),
+                Outer::Named(_, _) | Outer::Literal(_) | Outer::Boundary(_),
             ) => prove_sequence_against_atom(
                 sequence,
                 left_roles,
@@ -318,7 +330,7 @@ where
                 active,
             ),
             (
-                Outer::Named(_) | Outer::Literal(_) | Outer::Boundary(_),
+                Outer::Named(_, _) | Outer::Literal(_) | Outer::Boundary(_),
                 Outer::Sequence(sequence),
             ) => prove_sequence_against_atom(
                 sequence,
@@ -404,6 +416,8 @@ fn directly_guaranteed_nonempty<Root>(
     match descriptor {
         SharedDescriptor::Declaration(_)
         | SharedDescriptor::Reference(_)
+        | SharedDescriptor::DeclarationExcluding { .. }
+        | SharedDescriptor::ReferenceExcluding { .. }
         | SharedDescriptor::Literal(_)
         | SharedDescriptor::Leaf(_)
         | SharedDescriptor::Application { .. }

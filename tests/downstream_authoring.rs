@@ -866,7 +866,7 @@ fn token_runs_are_longest_match_and_never_split_to_make_a_parse_work() {
 fn downstream_typed_record_uses_the_same_shared_evaluator() {
     let expected = type_id(FirstFixtureRoot::Universal, &[6, 4, 2]);
     let record = DownstreamDeclarationRecord::new();
-    let entry = StructuralEntry::new(
+    let application_entry = StructuralEntry::new(
         expected.clone(),
         vec![ConstructorCodec::new(
             EncodedConstructorId::under(&expected, 1),
@@ -885,7 +885,7 @@ fn downstream_typed_record_uses_the_same_shared_evaluator() {
             StructuralVocabularyIdentity::language(b"downstream custom vocabulary"),
             discovery(),
             rendering(),
-            vec![entry],
+            vec![application_entry],
         ),
         &profile,
     )
@@ -1053,6 +1053,111 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
             .expect("literal branch encodes through the same alternation"),
         "Widget"
     );
+}
+
+#[test]
+fn reserved_application_is_disjoint_from_an_excluding_reference_application() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[8, 9]);
+    let keyword = encoded(FirstFixtureRoot::Universal, &[8, 10]);
+    let future = StructuralRule::Application(
+        ApplicationRule::new(
+            APPLICATION,
+            SharedDescriptor::Literal(keyword.clone()),
+            SharedDescriptor::Reference(AtomDescriptor::any_case()),
+        )
+        .expect("future application"),
+    );
+    let ordinary = StructuralRule::Application(
+        ApplicationRule::new(
+            APPLICATION,
+            SharedDescriptor::ReferenceExcluding {
+                atom: AtomDescriptor::any_case(),
+                excluded: vec![keyword.clone()],
+            },
+            SharedDescriptor::Reference(AtomDescriptor::any_case()),
+        )
+        .expect("ordinary application"),
+    );
+    let application_entry = StructuralEntry::new(
+        expected.clone(),
+        vec![
+            ConstructorCodec::new(
+                EncodedConstructorId::under(&expected, 1),
+                vec![AcceptedDecodeForm::new(
+                    DecodeFormId::new(1),
+                    future.clone(),
+                )],
+                future,
+            ),
+            ConstructorCodec::new(
+                EncodedConstructorId::under(&expected, 2),
+                vec![AcceptedDecodeForm::new(
+                    DecodeFormId::new(1),
+                    ordinary.clone(),
+                )],
+                ordinary,
+            ),
+        ],
+    );
+    let profile = profile();
+    let application_table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"reserved application exclusion"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"identity-level reserved words"),
+            discovery(),
+            rendering(),
+            vec![application_entry],
+        ),
+        &profile,
+    )
+    .expect("identity exclusion proves the applications disjoint");
+    let target = encoded(FirstFixtureRoot::Universal, &[8, 11]);
+    let module = encoded(FirstFixtureRoot::Universal, &[8, 12]);
+    let member = encoded(FirstFixtureRoot::Universal, &[8, 13]);
+    let mut bindings = Bindings::default();
+    bindings.spelling(&keyword, "Realize");
+    bindings.reference(8, 14, "target", &target);
+    bindings.reference(0, 6, "module", &module);
+    bindings.reference(7, 13, "Member", &member);
+    let evaluator = StructuralEvaluator::new(&application_table).expect("shared evaluator");
+
+    let decoded = evaluator
+        .decode_text(&expected, "Realize.target", &bindings)
+        .expect("reserved application");
+    assert_eq!(
+        decoded.constructor(),
+        &EncodedConstructorId::under(&expected, 1)
+    );
+    let decoded = evaluator
+        .decode_text(&expected, "module.Member", &bindings)
+        .expect("ordinary reference application");
+    assert_eq!(
+        decoded.constructor(),
+        &EncodedConstructorId::under(&expected, 2)
+    );
+
+    let mut excluded = Bindings::default();
+    excluded.spelling(&keyword, "Realize");
+    excluded.reference(0, 7, "Realize", &keyword);
+    let reference_only = type_id(FirstFixtureRoot::Universal, &[8, 14]);
+    let reference_entry = entry(
+        reference_only.clone(),
+        StructuralRule::Unary(
+            UnaryRule::new(SharedDescriptor::ReferenceExcluding {
+                atom: AtomDescriptor::any_case(),
+                excluded: vec![keyword],
+            })
+            .expect("excluding reference"),
+        ),
+    );
+    let reference_table = table(vec![reference_entry]).expect("reference-only table");
+    let reference_evaluator =
+        StructuralEvaluator::new(&reference_table).expect("reference evaluator");
+    assert!(matches!(
+        reference_evaluator.decode_text(&reference_only, "Realize", &excluded),
+        Err(DecodeError::NoAlternative { .. })
+    ));
 }
 
 #[test]

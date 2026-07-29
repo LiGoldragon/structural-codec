@@ -371,6 +371,8 @@ fn descriptor_requires_landing<Root>(descriptor: &SharedDescriptor<Root>) -> boo
     match descriptor {
         SharedDescriptor::Declaration(_)
         | SharedDescriptor::Reference(_)
+        | SharedDescriptor::DeclarationExcluding { .. }
+        | SharedDescriptor::ReferenceExcluding { .. }
         | SharedDescriptor::Leaf(_)
         | SharedDescriptor::Delegate { .. }
         | SharedDescriptor::Repeated { .. } => true,
@@ -411,7 +413,9 @@ fn verify_shape<Root: Clone + Eq>(
     }
     match (expected, found) {
         (LandingShape::Declaration, SharedDescriptor::Declaration(_))
-        | (LandingShape::Reference, SharedDescriptor::Reference(_)) => Ok(()),
+        | (LandingShape::Declaration, SharedDescriptor::DeclarationExcluding { .. })
+        | (LandingShape::Reference, SharedDescriptor::Reference(_))
+        | (LandingShape::Reference, SharedDescriptor::ReferenceExcluding { .. }) => Ok(()),
         (LandingShape::Literal(expected), SharedDescriptor::Literal(found))
             if expected == found =>
         {
@@ -502,6 +506,8 @@ impl LandingShapeKind {
 pub enum DescriptorKind {
     Declaration,
     Reference,
+    DeclarationExcluding,
+    ReferenceExcluding,
     Literal,
     Leaf,
     Delegate,
@@ -521,6 +527,8 @@ impl DescriptorKind {
         match descriptor {
             SharedDescriptor::Declaration(_) => Self::Declaration,
             SharedDescriptor::Reference(_) => Self::Reference,
+            SharedDescriptor::DeclarationExcluding { .. } => Self::DeclarationExcluding,
+            SharedDescriptor::ReferenceExcluding { .. } => Self::ReferenceExcluding,
             SharedDescriptor::Literal(_) => Self::Literal,
             SharedDescriptor::Leaf(_) => Self::Leaf,
             SharedDescriptor::Delegate { .. } => Self::Delegate,
