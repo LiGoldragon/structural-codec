@@ -1,6 +1,6 @@
 [package]
 name         = "structural-codec"
-version      = "0.8.0"
+version      = "0.9.0"
 autotests    = false
 edition      = "2024"
 rust-version = "1.85"
@@ -16,6 +16,10 @@ path = "src/lib.rs"
 [[test]]
 name = "downstream_authoring"
 path = "tests/downstream_authoring.rs"
+
+[[test]]
+name = "landing_declarations"
+path = "tests/landing_declarations.rs"
 
 [dependencies]
 content-identity = { git = "https://github.com/LiGoldragon/content-identity.git", rev = "24b43bae5d9748b0e7f679c6ec9f85a643c4d36a" }

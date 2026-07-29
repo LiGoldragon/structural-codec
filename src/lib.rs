@@ -44,6 +44,7 @@ pub mod error;
 pub mod evaluator;
 pub mod form;
 pub mod ids;
+pub mod landing;
 pub mod names;
 pub mod table;
 pub mod textual_form;
@@ -66,6 +67,11 @@ pub use form::{
     UnaryRoot, UnaryRule,
 };
 pub use ids::{DecodeFormId, EncodedConstructorId, EncodedTypeId, FieldRole, StableRoleId};
+pub use landing::{
+    DescriptorKind, LandingConstructorDeclaration, LandingDeclarationCatalog,
+    LandingFieldDeclaration, LandingShape, LandingShapeKind, LandingTypeDeclaration,
+    LanguageDeclaration, LanguageDeclarationError, VerifiedLandingClosure,
+};
 pub use name_table::{EncodedId, LocalEncodedId, TableAddress};
 pub use names::{
     DeclarationAssignment, DecodeNameBindings, EncodedNameResolver, NameOccurrence,

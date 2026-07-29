@@ -23,6 +23,7 @@ pub enum FieldValue<Root> {
     /// their own typed roles in the enclosing mirror.
     OrderedProduct,
     Delimited(#[rkyv(omit_bounds)] Box<FieldValue<Root>>),
+    Carrier(#[rkyv(omit_bounds)] Box<FieldValue<Root>>),
     Application {
         #[rkyv(omit_bounds)]
         head: Box<FieldValue<Root>>,

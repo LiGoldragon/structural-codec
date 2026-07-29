@@ -504,6 +504,17 @@ where
                     .ok_or(TableError::MissingRole { role: *content })?;
                 Self::validate_descriptor(child, roles, profile, block_discovery)?;
             }
+            SharedDescriptor::Carrier { carrier, content } => {
+                if !matches!(
+                    profile.definition(*carrier)?.trigger,
+                    Trigger::Carrier { .. }
+                ) {
+                    return Err(TableError::WrongTriggerKind {
+                        identifier: *carrier,
+                    });
+                }
+                Self::validate_descriptor(content, roles, profile, block_discovery)?;
+            }
             SharedDescriptor::Repeated { element, .. } => {
                 Self::validate_descriptor(element, roles, profile, block_discovery)?
             }

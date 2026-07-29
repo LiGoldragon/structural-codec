@@ -198,6 +198,14 @@ pub enum SharedDescriptor<Root> {
         boundary: TriggerIdentifier,
         content: StableRoleId,
     },
+    /// A carrier whose captured body is interpreted by another typed
+    /// descriptor. This differs from a `PipeText` leaf: a carried declaration
+    /// or reference remains an encoded identity rather than becoming text.
+    Carrier {
+        carrier: TriggerIdentifier,
+        #[rkyv(omit_bounds)]
+        content: Box<SharedDescriptor<Root>>,
+    },
     Repeated {
         minimum: u64,
         maximum: Option<u64>,

@@ -81,6 +81,7 @@ enum DraftFieldValue<Root> {
     Scalar(ScalarValue),
     OrderedProduct,
     Delimited(Rc<DraftFieldValue<Root>>),
+    Carrier(Rc<DraftFieldValue<Root>>),
     Application {
         head: Rc<DraftFieldValue<Root>>,
         payload: Rc<DraftFieldValue<Root>>,
@@ -99,6 +100,9 @@ impl<Root: Clone> DraftFieldValue<Root> {
             Self::OrderedProduct => FieldValue::OrderedProduct,
             Self::Delimited(value) => {
                 FieldValue::Delimited(Box::new(value.as_ref().clone().materialize()))
+            }
+            Self::Carrier(value) => {
+                FieldValue::Carrier(Box::new(value.as_ref().clone().materialize()))
             }
             Self::Application { head, payload } => FieldValue::Application {
                 head: Box::new(head.as_ref().clone().materialize()),
@@ -390,7 +394,7 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
     fn take_carrier<Root, Record: StructureRecord<Root>>(
         &mut self,
         evaluator: &StructuralEvaluator<'_, Root, Record>,
-    ) -> Result<Option<String>, DecodeError<Root>>
+    ) -> Result<Option<(String, SourceBound)>, DecodeError<Root>>
     where
         Root: Clone + Ord,
     {
@@ -402,12 +406,13 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
             return Ok(None);
         }
         self.position = matched.end();
-        Ok(Some(
+        Ok(Some((
             matched
                 .body()
                 .expect("carrier trigger matches carry a body")
                 .to_owned(),
-        ))
+            SourceBound::checked(self.source, matched.start(), matched.end())?,
+        )))
     }
 
     fn take_boundary<Root, Record: StructureRecord<Root>>(
@@ -821,6 +826,26 @@ where
                 }
                 Ok(DraftFieldValue::Delimited(Rc::new(value)))
             }
+            SharedDescriptor::Carrier { carrier, content } => {
+                let Some((body, bound)) = input.take_carrier(self)? else {
+                    return Err(DecodeError::BlockKindMismatch {
+                        expected: "carrier",
+                        found: "source",
+                    });
+                };
+                if !matches!(
+                    self.profile.definition(*carrier)?.trigger,
+                    Trigger::Carrier { .. }
+                ) {
+                    return Err(DecodeError::BlockKindMismatch {
+                        expected: "carrier trigger",
+                        found: "profile trigger",
+                    });
+                }
+                Ok(DraftFieldValue::Carrier(Rc::new(
+                    self.decode_carrier_content(content, &body, bound, bindings)?,
+                )))
+            }
             SharedDescriptor::Repeated { .. } => Err(DecodeError::BlockKindMismatch {
                 expected: "repeated children",
                 found: "source",
@@ -1092,7 +1117,7 @@ where
         structural_stops: &[String],
     ) -> Result<ScalarValue, DecodeError<Root>> {
         let mut carrier = input.clone();
-        if let Some(body) = carrier.take_carrier(self)? {
+        if let Some((body, _)) = carrier.take_carrier(self)? {
             *input = carrier;
             return match codec {
                 LeafCodec::Text | LeafCodec::PipeText => Ok(ScalarValue::Text(body)),
@@ -1132,6 +1157,56 @@ where
             },
             LeafCodec::PipeText => unreachable!("pipe text returned before bare leaf parsing"),
             LeafCodec::Foreign(_) => Err(DecodeError::LeafNotFlattenable),
+        }
+    }
+
+    fn decode_carrier_content<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        descriptor: &SharedDescriptor<Root>,
+        body: &str,
+        bound: SourceBound,
+        bindings: &Bindings,
+    ) -> Result<DraftFieldValue<Root>, DecodeError<Root>> {
+        let atom = Atom::new(body);
+        match descriptor {
+            SharedDescriptor::Declaration(form) => {
+                if !form.accepts(&atom) {
+                    return Err(DecodeError::CaseMismatch);
+                }
+                let assignment = bindings
+                    .declaration_assignment(NameOccurrence::new(body, bound))
+                    .ok_or(DecodeError::MissingDeclarationAssignment { bound })?;
+                self.verify_bound_spelling(bindings, assignment.encoded_id(), body, bound)?;
+                Ok(DraftFieldValue::Declaration(assignment))
+            }
+            SharedDescriptor::Reference(form) => {
+                if !form.accepts(&atom) {
+                    return Err(DecodeError::CaseMismatch);
+                }
+                let reference = bindings
+                    .reference_resolution(NameOccurrence::new(body, bound))
+                    .ok_or(DecodeError::UnresolvedReference { bound })?;
+                self.verify_bound_spelling(bindings, reference.encoded_id(), body, bound)?;
+                Ok(DraftFieldValue::Reference(reference))
+            }
+            SharedDescriptor::Literal(identifier) => {
+                let spelling = bindings.resolve(identifier).ok_or_else(|| {
+                    DecodeError::UnknownEncodedName {
+                        encoded_id: identifier.clone(),
+                    }
+                })?;
+                if spelling.as_str() != body {
+                    return Err(DecodeError::LiteralMismatch);
+                }
+                Ok(DraftFieldValue::Literal(identifier.clone()))
+            }
+            SharedDescriptor::Leaf(LeafCodec::Text | LeafCodec::PipeText) => {
+                Ok(DraftFieldValue::Scalar(ScalarValue::Text(body.to_owned())))
+            }
+            _ => Err(DecodeError::BlockKindMismatch {
+                expected: "carrier-compatible typed content",
+                found: "structural descriptor",
+            }),
         }
     }
 
@@ -1303,6 +1378,11 @@ where
                     )?,
                     closing,
                 ))
+            }
+            (SharedDescriptor::Carrier { carrier, content }, FieldValue::Carrier(value)) => {
+                let body =
+                    self.encode_descriptor(content, value, descriptors, mirror, resolver, context)?;
+                self.encode_carrier_with(*carrier, &body)
             }
             (
                 SharedDescriptor::Repeated {
@@ -1476,6 +1556,26 @@ where
         } = &self.profile.definition(carrier)?.trigger
         else {
             return Err(EncodeError::NonCanonicalSpelling);
+        };
+        let body = escape.as_ref().map_or_else(
+            || body.to_owned(),
+            |escape| body.replace(closing, &format!("{escape}{closing}")),
+        );
+        Ok(format!("{opening}{body}{closing}"))
+    }
+
+    fn encode_carrier_with(
+        &self,
+        carrier: TriggerIdentifier,
+        body: &str,
+    ) -> Result<String, EncodeError<Root>> {
+        let Trigger::Carrier {
+            opening,
+            closing,
+            escape,
+        } = &self.profile.definition(carrier)?.trigger
+        else {
+            return Err(EncodeError::ShapeMismatch);
         };
         let body = escape.as_ref().map_or_else(
             || body.to_owned(),

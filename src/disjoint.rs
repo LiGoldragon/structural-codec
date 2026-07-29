@@ -36,6 +36,7 @@ enum Outer<'a, Root> {
     Literal(&'a name_table::EncodedId<Root>),
     Application(&'a SharedDescriptor<Root>, &'a SharedDescriptor<Root>),
     Boundary(raw_discovery::TriggerIdentifier),
+    Carrier(raw_discovery::TriggerIdentifier),
     Sequence(&'a crate::form::OrderedSequence),
     Opaque,
 }
@@ -74,6 +75,7 @@ fn outer<'a, Root>(
         }
         SharedDescriptor::Delimited { boundary, .. }
         | SharedDescriptor::ItemBoundary { boundary, .. } => Ok(Outer::Boundary(*boundary)),
+        SharedDescriptor::Carrier { carrier, .. } => Ok(Outer::Carrier(*carrier)),
         SharedDescriptor::OrderedSequence(sequence) => Ok(Outer::Sequence(sequence)),
         SharedDescriptor::Leaf(_)
         | SharedDescriptor::Repeated { .. }
@@ -211,6 +213,9 @@ where
         }
         _ => match (outer(left, left_roles)?, outer(right, right_roles)?) {
             (Outer::Opaque, _) | (_, Outer::Opaque) => reason(DisjointnessReason::OpaqueForm),
+            (Outer::Carrier(left), Outer::Carrier(right)) if left != right => Ok(()),
+            (Outer::Carrier(_), Outer::Carrier(_)) => reason(DisjointnessReason::SharedBoundary),
+            (Outer::Carrier(_), _) | (_, Outer::Carrier(_)) => Ok(()),
             (Outer::Named(left), Outer::Named(right)) => match (left, right) {
                 (Some(left), Some(right)) if left != right => Ok(()),
                 _ => reason(DisjointnessReason::OverlappingAtomCase),
@@ -368,6 +373,7 @@ fn directly_guaranteed_nonempty<Root>(
         | SharedDescriptor::Leaf(_)
         | SharedDescriptor::Application { .. }
         | SharedDescriptor::Delimited { .. }
+        | SharedDescriptor::Carrier { .. }
         | SharedDescriptor::ItemBoundary { .. } => true,
         SharedDescriptor::Repeated {
             minimum, element, ..
