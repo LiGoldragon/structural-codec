@@ -13,12 +13,12 @@ use structural_codec::{
     AcceptedDecodeForm, AddressedStructuralTable, ApplicationHead, ApplicationPayload,
     ApplicationRule, AtomCase, AtomDescriptor, BorrowedFieldView, ConstructorCodec,
     ContextualTextualPolicy, DeclarationAssignment, DecodeError, DecodeFormId, DecodeNameBindings,
-    EncodedConstructorId, EncodedNameResolver, EncodedTypeId, FieldEnd, FieldLink, FieldRole,
-    FieldValue, FieldVisitor, NameOccurrence, OrderedProduct, OrderedSequence, PlannedFieldValue,
-    Position, ResolvedReference, RuleCoproduct, SharedDescriptor, StableRoleId, StructuralEntry,
-    StructuralEvaluator, StructuralRule, StructuralValue, StructuralVocabularyIdentity,
-    StructureRecord, TableError, TableIdentityPayload, TargetLayoutIdentity,
-    TextualRenderingPolicy, UnaryRule,
+    EncodeError, EncodedConstructorId, EncodedNameResolver, EncodedTypeId, FieldEnd, FieldLink,
+    FieldRole, FieldValue, FieldVisitor, NameOccurrence, OrderedProduct, OrderedSequence,
+    PlannedFieldValue, Position, ResolvedReference, RuleCoproduct, SharedDescriptor, StableRoleId,
+    StructuralEntry, StructuralEvaluator, StructuralRule, StructuralValue,
+    StructuralVocabularyIdentity, StructureRecord, TableError, TableIdentityPayload,
+    TargetLayoutIdentity, TextualRenderingPolicy, UnaryRule,
 };
 
 const SQUARE: TriggerIdentifier = TriggerIdentifier::new(1);
@@ -162,6 +162,45 @@ fixture_role!(AmbiguousSequenceRepeatedRole, 964);
 fixture_role!(AmbiguousSequenceRequiredRole, 965);
 fixture_role!(AmbiguousSequenceLiteralRole, 966);
 fixture_role!(RejectedCandidateRole, 967);
+fixture_role!(MultiDelegateRole, 968);
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+struct MultiDelegateRecord<Root> {
+    delegated: Position<MultiDelegateRole, Root>,
+}
+
+impl<Root: Clone> MultiDelegateRecord<Root> {
+    fn new(left: EncodedTypeId<Root>, right: EncodedTypeId<Root>) -> Self {
+        Self {
+            delegated: Position::try_new(SharedDescriptor::Alternation(vec![
+                SharedDescriptor::Delegate {
+                    target: left,
+                    payload: None,
+                },
+                SharedDescriptor::Delegate {
+                    target: right,
+                    payload: None,
+                },
+            ]))
+            .expect("multi-delegate role"),
+        }
+    }
+}
+
+impl<Root> StructureRecord<Root> for MultiDelegateRecord<Root> {
+    type View<'record>
+        = FieldLink<'record, MultiDelegateRole, Root, FieldEnd>
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.delegated.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        FieldLink::new(&self.delegated, FieldEnd)
+    }
+}
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct SixSlotDocumentRecord<Root> {
@@ -1884,5 +1923,91 @@ fn typed_position_overlap_is_refused_instead_of_order_resolved() {
         Err(TableError::Disjointness(
             structural_codec::DisjointnessError::NotProvablyDisjoint { .. }
         ))
+    ));
+}
+
+#[test]
+fn delegated_alternation_recovers_only_when_the_value_belongs_to_another_target() {
+    type Rule =
+        RuleCoproduct<MultiDelegateRecord<FirstFixtureRoot>, StructuralRule<FirstFixtureRoot>>;
+
+    let parent = type_id(FirstFixtureRoot::Universal, &[60]);
+    let reverse_parent = type_id(FirstFixtureRoot::Universal, &[63]);
+    let left = type_id(FirstFixtureRoot::Universal, &[61]);
+    let right = type_id(FirstFixtureRoot::Universal, &[62]);
+    let left_word = encoded(FirstFixtureRoot::Universal, &[70]);
+    let right_word = encoded(FirstFixtureRoot::Universal, &[71]);
+    let parent_rule = Rule::Left(MultiDelegateRecord::new(left.clone(), right.clone()));
+    let reverse_parent_rule = Rule::Left(MultiDelegateRecord::new(right.clone(), left.clone()));
+    let left_rule = Rule::Right(StructuralRule::Unary(
+        UnaryRule::new(SharedDescriptor::Literal(left_word.clone())).expect("left literal"),
+    ));
+    let right_rule = Rule::Right(StructuralRule::Unary(
+        UnaryRule::new(SharedDescriptor::Literal(right_word.clone())).expect("right literal"),
+    ));
+    let profile = profile();
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"multi delegate alternation"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"delegated target ownership"),
+            discovery(),
+            rendering(),
+            vec![
+                typed_entry(parent.clone(), parent_rule),
+                typed_entry(reverse_parent.clone(), reverse_parent_rule),
+                typed_entry(left.clone(), left_rule),
+                typed_entry(right.clone(), right_rule),
+            ],
+        ),
+        &profile,
+    )
+    .expect("distinct delegate targets seal");
+    let evaluator = StructuralEvaluator::new(&table).expect("shared evaluator");
+    let mut bindings = Bindings::default();
+    bindings.spelling(&left_word, "Left");
+    bindings.spelling(&right_word, "Right");
+
+    let right_value = evaluator
+        .decode_text(&right, "Right", &bindings)
+        .expect("right delegated target decodes");
+    let parent_constructor = EncodedConstructorId::under(&parent, 1);
+    let mut parent_record = StructuralValue::record(parent_constructor.clone());
+    parent_record
+        .insert::<MultiDelegateRole>(FieldValue::Delegated(Box::new(right_value)))
+        .expect("typed delegated field");
+    let value = parent_record.finish();
+    assert_eq!(
+        evaluator
+            .encode_text(&parent, &value, &bindings)
+            .expect("first target mismatch recovers to the right delegate"),
+        "Right"
+    );
+
+    let left_value = evaluator
+        .decode_text(&left, "Left", &bindings)
+        .expect("left delegated target decodes");
+    let mut reverse_parent_record =
+        StructuralValue::record(EncodedConstructorId::under(&reverse_parent, 1));
+    reverse_parent_record
+        .insert::<MultiDelegateRole>(FieldValue::Delegated(Box::new(left_value)))
+        .expect("typed reverse delegated field");
+    assert_eq!(
+        evaluator
+            .encode_text(&reverse_parent, &reverse_parent_record.finish(), &bindings)
+            .expect("reversed first target mismatch recovers to the left delegate"),
+        "Left"
+    );
+
+    let unknown_right_constructor = EncodedConstructorId::under(&right, 2);
+    let unknown_right = StructuralValue::record(unknown_right_constructor.clone()).finish();
+    let mut corrupted_parent = StructuralValue::record(parent_constructor);
+    corrupted_parent
+        .insert::<MultiDelegateRole>(FieldValue::Delegated(Box::new(unknown_right)))
+        .expect("typed delegated corruption");
+    assert!(matches!(
+        evaluator.encode_text(&parent, &corrupted_parent.finish(), &bindings),
+        Err(EncodeError::UnknownConstructor { chosen })
+            if chosen == unknown_right_constructor
     ));
 }

@@ -172,7 +172,7 @@ pub enum EncodeError<Root> {
         encoded_id: name_table::EncodedId<Root>,
     },
     #[error("delegated position did not satisfy {payload:?}")]
-    DelegationPayloadMismatch { payload: DelegationPayload },
+    DelegationPayloadMismatch { payload: Option<DelegationPayload> },
     #[error("repeated position held {found} objects outside its declared bounds")]
     RepetitionCardinality { found: u64 },
     #[error("typed role {role:?} is absent from this record or mirror")]

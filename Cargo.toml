@@ -1,6 +1,6 @@
 [package]
 name         = "structural-codec"
-version      = "0.18.0"
+version      = "0.19.0"
 autotests    = false
 edition      = "2024"
 rust-version = "1.85"

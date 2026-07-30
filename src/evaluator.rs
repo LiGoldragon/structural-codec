@@ -1795,11 +1795,16 @@ where
                 self.encode_leaf(codec, value, context)
             }
             (SharedDescriptor::Delegate { target, payload }, FieldValue::Delegated(value)) => {
+                if value.constructor().type_id() != target {
+                    return Err(EncodeError::DelegationPayloadMismatch { payload: *payload });
+                }
                 let text = self.encode_type_at_context(target, value, resolver, context)?;
                 if let Some(payload) = payload {
                     let atom = Atom::new(&text);
                     if text.contains('.') || !payload.accepts(&atom) {
-                        return Err(EncodeError::DelegationPayloadMismatch { payload: *payload });
+                        return Err(EncodeError::DelegationPayloadMismatch {
+                            payload: Some(*payload),
+                        });
                     }
                 }
                 Ok(text)
