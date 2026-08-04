@@ -466,6 +466,12 @@ impl<'source, 'tree> BoundedCursor<'source, 'tree> {
                 // repeated loop owns one consumption before choosing its next
                 // element; otherwise an inner delegate could hide the cue its
                 // enclosing application still needs to complete.
+                if structural_stops
+                    .iter()
+                    .any(|text| self.source[self.position..self.bound.end()].starts_with(text))
+                {
+                    return Ok(false);
+                }
                 if self
                     .local_match(evaluator)?
                     .is_some_and(|matched| matched.is_trivia())

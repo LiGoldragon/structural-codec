@@ -20,7 +20,7 @@ use structural_codec::{
     OrderedSequence, PlannedFieldValue, Position, ResolvedReference, RuleCoproduct,
     SharedDescriptor, StableRoleId, StructuralEntry, StructuralEvaluator, StructuralRule,
     StructuralValue, StructuralVocabularyIdentity, StructureRecord, TableError,
-    TableIdentityPayload, TargetLayoutIdentity, TextualRenderingPolicy, UnaryRule,
+    TableIdentityPayload, TargetLayoutIdentity, TextualRenderingPolicy, UnaryRoot, UnaryRule,
 };
 
 const SQUARE: TriggerIdentifier = TriggerIdentifier::new(1);
@@ -1226,6 +1226,162 @@ fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
             .encode_text(&expected, &reflected.finish(), &bindings)
             .expect("adjacent angle application encoding"),
         "Result<Vector Error>"
+    );
+}
+
+#[test]
+fn adjacent_angle_application_preserves_nested_strict_shape() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[7, 5]);
+    let identity = StructuralRule::Unary(
+        UnaryRule::new(SharedDescriptor::Reference(AtomDescriptor::with_case(
+            AtomCase::PascalCase,
+        )))
+        .expect("identity rule"),
+    );
+    let application = StructuralRule::AdjacentApplicationDelimited(
+        AdjacentApplicationDelimitedRule::new(
+            ANGLE,
+            SharedDescriptor::Reference(AtomDescriptor::with_case(AtomCase::PascalCase)),
+            SharedDescriptor::Delegate {
+                target: expected.clone(),
+                payload: None,
+            },
+            1,
+            None,
+        )
+        .expect("recursive adjacent application rule"),
+    );
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"nested adjacent angle application layout"),
+            profile().identity(),
+            StructuralVocabularyIdentity::language(b"nested adjacent angle application vocabulary"),
+            angle_discovery(),
+            angle_rendering(),
+            vec![StructuralEntry::new(
+                expected.clone(),
+                vec![
+                    ConstructorCodec::new(
+                        EncodedConstructorId::under(&expected, 0),
+                        vec![AcceptedDecodeForm::new(
+                            DecodeFormId::new(0),
+                            identity.clone(),
+                        )],
+                        identity,
+                    ),
+                    ConstructorCodec::new(
+                        EncodedConstructorId::under(&expected, 1),
+                        vec![AcceptedDecodeForm::new(
+                            DecodeFormId::new(0),
+                            application.clone(),
+                        )],
+                        application,
+                    ),
+                ],
+            )],
+        ),
+        &profile(),
+    )
+    .expect("nested adjacent angle table");
+    let result = encoded(FirstFixtureRoot::Universal, &[7, 6]);
+    let vector = encoded(FirstFixtureRoot::Universal, &[7, 7]);
+    let ordered = encoded(FirstFixtureRoot::Universal, &[7, 8]);
+    let error = encoded(FirstFixtureRoot::Universal, &[7, 9]);
+    let mut bindings = Bindings::default();
+    bindings.reference(0, 6, "Result", &result);
+    bindings.reference(7, 13, "Vector", &vector);
+    bindings.reference(14, 21, "Ordered", &ordered);
+    bindings.reference(23, 28, "Error", &error);
+    let evaluator = StructuralEvaluator::new(&table).expect("nested adjacent evaluator");
+
+    let decoded = evaluator
+        .decode_text(&expected, "Result<Vector<Ordered> Error>", &bindings)
+        .expect("nested strict bare angle application");
+    let Some(FieldValue::Repeated(items)) = decoded.field::<AdjacentApplicationDelimitedItems>()
+    else {
+        panic!("outer type application keeps its typed argument sequence");
+    };
+    let [
+        FieldValue::Delegated(vector_value),
+        FieldValue::Delegated(error_value),
+    ] = items.as_slice()
+    else {
+        panic!("outer type application preserves its two delegated arguments");
+    };
+    assert_eq!(
+        vector_value.constructor(),
+        &EncodedConstructorId::under(&expected, 1)
+    );
+    assert_eq!(
+        error_value.constructor(),
+        &EncodedConstructorId::under(&expected, 0)
+    );
+    assert!(matches!(
+        vector_value.field::<AdjacentApplicationDelimitedItems>(),
+        Some(FieldValue::Repeated(items))
+            if matches!(items.as_slice(), [FieldValue::Delegated(ordered_value)]
+                if ordered_value.constructor() == &EncodedConstructorId::under(&expected, 0))
+    ));
+    assert!(
+        evaluator
+            .decode_text(&expected, "Result.<Vector<Ordered> Error>", &bindings)
+            .is_err()
+    );
+    assert!(
+        evaluator
+            .decode_text(&expected, "Result<|Vector| Error>", &bindings)
+            .is_err()
+    );
+    assert_eq!(
+        evaluator
+            .encode_text(&expected, &decoded, &bindings)
+            .expect("decoded nested angle application reemits"),
+        "Result<Vector<Ordered> Error>"
+    );
+
+    let identity_value = |reference| {
+        let mut value = StructuralValue::record(EncodedConstructorId::under(&expected, 0));
+        value
+            .insert::<UnaryRoot>(FieldValue::Reference(ResolvedReference::new(reference)))
+            .expect("identity role");
+        value.finish()
+    };
+    let adjacent_value = |head, items| {
+        let items = FieldValue::Repeated(items);
+        let body = FieldValue::Delimited(Box::new(items.clone()));
+        let mut value = StructuralValue::record(EncodedConstructorId::under(&expected, 1));
+        value
+            .insert::<AdjacentApplicationDelimitedRoot>(FieldValue::OrderedProduct)
+            .expect("adjacent root");
+        value
+            .insert::<AdjacentApplicationDelimitedHead>(FieldValue::Reference(
+                ResolvedReference::new(head),
+            ))
+            .expect("adjacent head");
+        value
+            .insert::<AdjacentApplicationDelimitedBody>(body)
+            .expect("adjacent body");
+        value
+            .insert::<AdjacentApplicationDelimitedItems>(items)
+            .expect("adjacent items");
+        value.finish()
+    };
+    let vector_value = adjacent_value(
+        vector.clone(),
+        vec![FieldValue::Delegated(Box::new(identity_value(ordered)))],
+    );
+    let reflected = adjacent_value(
+        result,
+        vec![
+            FieldValue::Delegated(Box::new(vector_value)),
+            FieldValue::Delegated(Box::new(identity_value(error))),
+        ],
+    );
+    assert_eq!(
+        evaluator
+            .encode_text(&expected, &reflected, &bindings)
+            .expect("nested adjacent angle encoding"),
+        "Result<Vector<Ordered> Error>"
     );
 }
 
