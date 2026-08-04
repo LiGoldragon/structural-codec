@@ -40,7 +40,7 @@ enum Outer<'a, Root> {
     Application(&'a SharedDescriptor<Root>, &'a SharedDescriptor<Root>),
     Boundary(raw_discovery::TriggerIdentifier),
     Carrier(raw_discovery::TriggerIdentifier),
-    Sequence(&'a crate::form::OrderedSequence),
+    Sequence(&'a crate::form::OrderedSequence, bool),
     Opaque,
 }
 
@@ -86,8 +86,8 @@ fn outer<'a, Root>(
         SharedDescriptor::Delimited { boundary, .. }
         | SharedDescriptor::ItemBoundary { boundary, .. } => Ok(Outer::Boundary(*boundary)),
         SharedDescriptor::Carrier { carrier, .. } => Ok(Outer::Carrier(*carrier)),
-        SharedDescriptor::OrderedSequence(sequence)
-        | SharedDescriptor::AdjacentSequence(sequence) => Ok(Outer::Sequence(sequence)),
+        SharedDescriptor::OrderedSequence(sequence) => Ok(Outer::Sequence(sequence, false)),
+        SharedDescriptor::AdjacentSequence(sequence) => Ok(Outer::Sequence(sequence, true)),
         SharedDescriptor::Leaf(_)
         | SharedDescriptor::Repeated { .. }
         | SharedDescriptor::OrderedProduct(_) => Ok(Outer::Opaque),
@@ -283,9 +283,17 @@ where
             | (Outer::Literal(_), Outer::Boundary(_))
             | (Outer::Application(_, _), Outer::Boundary(_))
             | (Outer::Boundary(_), Outer::Application(_, _)) => Ok(()),
+            // An adjacent sequence has no operator between its members. An
+            // application has one explicit operator, so their outer source
+            // shapes cannot coincide. Keeping this distinct from an ordinary
+            // ordered sequence is essential: ordinary sequences may include
+            // whitespace or other material that does not prove the absence of
+            // an application operator.
+            (Outer::Sequence(_, true), Outer::Application(_, _))
+            | (Outer::Application(_, _), Outer::Sequence(_, true)) => Ok(()),
             (Outer::Boundary(left), Outer::Boundary(right)) if left != right => Ok(()),
             (Outer::Boundary(_), Outer::Boundary(_)) => reason(DisjointnessReason::SharedBoundary),
-            (Outer::Sequence(left), Outer::Sequence(right)) => {
+            (Outer::Sequence(left, _), Outer::Sequence(right, _)) => {
                 let mut first_cycle = None;
                 for (left_role, right_role) in left
                     .members()
@@ -320,7 +328,7 @@ where
                 }
             }
             (
-                Outer::Sequence(sequence),
+                Outer::Sequence(sequence, _),
                 Outer::Named(_, _) | Outer::Literal(_) | Outer::Boundary(_),
             ) => prove_sequence_against_atom(
                 sequence,
@@ -332,7 +340,7 @@ where
             ),
             (
                 Outer::Named(_, _) | Outer::Literal(_) | Outer::Boundary(_),
-                Outer::Sequence(sequence),
+                Outer::Sequence(sequence, _),
             ) => prove_sequence_against_atom(
                 sequence,
                 right_roles,
@@ -341,7 +349,7 @@ where
                 entries,
                 active,
             ),
-            (Outer::Sequence(_), _) | (_, Outer::Sequence(_)) => {
+            (Outer::Sequence(_, _), _) | (_, Outer::Sequence(_, _)) => {
                 reason(DisjointnessReason::OpaqueForm)
             }
             (

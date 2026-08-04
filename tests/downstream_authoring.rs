@@ -1230,6 +1230,108 @@ fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
 }
 
 #[test]
+fn dotted_applications_are_disjoint_from_adjacent_angle_applications() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[7, 10]);
+    let identity = StructuralRule::Unary(
+        UnaryRule::new(SharedDescriptor::Reference(AtomDescriptor::with_case(
+            AtomCase::PascalCase,
+        )))
+        .expect("identity rule"),
+    );
+    let adjacent = StructuralRule::AdjacentApplicationDelimited(
+        AdjacentApplicationDelimitedRule::new(
+            ANGLE,
+            SharedDescriptor::Reference(AtomDescriptor::with_case(AtomCase::PascalCase)),
+            SharedDescriptor::Delegate {
+                target: expected.clone(),
+                payload: None,
+            },
+            1,
+            None,
+        )
+        .expect("adjacent angle rule"),
+    );
+    let dotted = StructuralRule::Application(
+        ApplicationRule::new(
+            APPLICATION,
+            SharedDescriptor::Declaration(AtomDescriptor::with_case(AtomCase::PascalCase)),
+            SharedDescriptor::Reference(AtomDescriptor::with_case(AtomCase::PascalCase)),
+        )
+        .expect("dotted application rule"),
+    );
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"dotted versus adjacent application layout"),
+            profile().identity(),
+            StructuralVocabularyIdentity::language(
+                b"dotted versus adjacent application vocabulary",
+            ),
+            angle_discovery(),
+            angle_rendering(),
+            vec![StructuralEntry::new(
+                expected.clone(),
+                vec![
+                    ConstructorCodec::new(
+                        EncodedConstructorId::under(&expected, 0),
+                        vec![AcceptedDecodeForm::new(
+                            DecodeFormId::new(0),
+                            identity.clone(),
+                        )],
+                        identity,
+                    ),
+                    ConstructorCodec::new(
+                        EncodedConstructorId::under(&expected, 1),
+                        vec![AcceptedDecodeForm::new(
+                            DecodeFormId::new(0),
+                            adjacent.clone(),
+                        )],
+                        adjacent,
+                    ),
+                    ConstructorCodec::new(
+                        EncodedConstructorId::under(&expected, 2),
+                        vec![AcceptedDecodeForm::new(
+                            DecodeFormId::new(0),
+                            dotted.clone(),
+                        )],
+                        dotted,
+                    ),
+                ],
+            )],
+        ),
+        &profile(),
+    )
+    .expect("adjacent and dotted outer forms are provably disjoint");
+    let result = encoded(FirstFixtureRoot::Universal, &[7, 11]);
+    let ordered = encoded(FirstFixtureRoot::Universal, &[7, 12]);
+    let sortable = encoded(FirstFixtureRoot::Universal, &[7, 13]);
+    let left = encoded(FirstFixtureRoot::Universal, &[7, 14]);
+    let mut bindings = Bindings::default();
+    bindings.reference(0, 6, "Result", &result);
+    bindings.reference(7, 14, "Ordered", &ordered);
+    bindings.reference(5, 13, "Sortable", &sortable);
+    bindings.reference(0, 4, "Left", &left);
+    bindings.declaration(0, 4, "Left", &left);
+    let evaluator = StructuralEvaluator::new(&table).expect("application evaluator");
+
+    assert_eq!(
+        evaluator
+            .decode_text(&expected, "Result<Ordered>", &bindings)
+            .expect("adjacent angle application")
+            .constructor()
+            .local(),
+        1
+    );
+    assert_eq!(
+        evaluator
+            .decode_text(&expected, "Left.Sortable", &bindings)
+            .expect("dotted application")
+            .constructor()
+            .local(),
+        2
+    );
+}
+
+#[test]
 fn adjacent_angle_application_preserves_nested_strict_shape() {
     let expected = type_id(FirstFixtureRoot::Universal, &[7, 5]);
     let identity = StructuralRule::Unary(
