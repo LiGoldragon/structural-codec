@@ -343,7 +343,7 @@ fn carrier_content_remains_a_lookup_only_typed_reference() {
     };
     let evaluator = StructuralEvaluator::new(&fixture.table).expect("table-owned evaluator");
     let decoded = evaluator
-        .decode_text(&fixture.child, "(|Feature|)", &bindings)
+        .decode_text(&fixture.child, "“Feature”", &bindings)
         .expect("typed carrier reference");
 
     assert_eq!(
@@ -356,7 +356,7 @@ fn carrier_content_remains_a_lookup_only_typed_reference() {
         evaluator
             .encode_text(&fixture.child, &decoded, &bindings)
             .expect("canonical carrier encoding"),
-        "(|Feature|)"
+        "“Feature”"
     );
 }
 

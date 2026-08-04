@@ -10,21 +10,24 @@ use raw_discovery::{
     SealedTokenProfile, TriggerIdentifier, TriggerSet,
 };
 use structural_codec::{
-    AcceptedDecodeForm, AddressedStructuralTable, ApplicationHead, ApplicationPayload,
-    ApplicationRule, AtomCase, AtomDescriptor, BorrowedFieldView, ConstructorCodec,
-    ContextualTextualPolicy, DeclarationAssignment, DecodeError, DecodeFormId, DecodeNameBindings,
-    EncodeError, EncodedConstructorId, EncodedNameResolver, EncodedTypeId, FieldEnd, FieldLink,
-    FieldRole, FieldValue, FieldVisitor, NameOccurrence, OrderedProduct, OrderedSequence,
-    PlannedFieldValue, Position, ResolvedReference, RuleCoproduct, SharedDescriptor, StableRoleId,
-    StructuralEntry, StructuralEvaluator, StructuralRule, StructuralValue,
-    StructuralVocabularyIdentity, StructureRecord, TableError, TableIdentityPayload,
-    TargetLayoutIdentity, TextualRenderingPolicy, UnaryRule,
+    AcceptedDecodeForm, AddressedStructuralTable, AdjacentApplicationDelimitedBody,
+    AdjacentApplicationDelimitedHead, AdjacentApplicationDelimitedItems,
+    AdjacentApplicationDelimitedRoot, AdjacentApplicationDelimitedRule, ApplicationHead,
+    ApplicationPayload, ApplicationRule, AtomCase, AtomDescriptor, BorrowedFieldView,
+    ConstructorCodec, ContextualTextualPolicy, DeclarationAssignment, DecodeError, DecodeFormId,
+    DecodeNameBindings, EncodeError, EncodedConstructorId, EncodedNameResolver, EncodedTypeId,
+    FieldEnd, FieldLink, FieldRole, FieldValue, FieldVisitor, NameOccurrence, OrderedProduct,
+    OrderedSequence, PlannedFieldValue, Position, ResolvedReference, RuleCoproduct,
+    SharedDescriptor, StableRoleId, StructuralEntry, StructuralEvaluator, StructuralRule,
+    StructuralValue, StructuralVocabularyIdentity, StructureRecord, TableError,
+    TableIdentityPayload, TargetLayoutIdentity, TextualRenderingPolicy, UnaryRule,
 };
 
 const SQUARE: TriggerIdentifier = TriggerIdentifier::new(1);
 const BRACE: TriggerIdentifier = TriggerIdentifier::new(2);
 const APPLICATION: TriggerIdentifier = TriggerIdentifier::new(3);
 const WHITESPACE: TriggerIdentifier = TriggerIdentifier::new(5);
+const ANGLE: TriggerIdentifier = TriggerIdentifier::new(7);
 const ROOT_CONTEXT: BoundaryDiscoveryContextIdentifier = BoundaryDiscoveryContextIdentifier::new(1);
 const CHILD_CONTEXT: BoundaryDiscoveryContextIdentifier =
     BoundaryDiscoveryContextIdentifier::new(2);
@@ -800,6 +803,31 @@ fn product_rendering() -> TextualRenderingPolicy {
     ])
 }
 
+fn angle_discovery() -> BlockTreeDiscoveryConfiguration {
+    let active = TriggerSet::new(vec![ANGLE, WHITESPACE]);
+    BlockTreeDiscoveryConfiguration::new(
+        BoundaryDiscoveryConfiguration::new(
+            ROOT_CONTEXT,
+            vec![
+                BoundaryDiscoveryContext::new(ROOT_CONTEXT, active.clone()),
+                BoundaryDiscoveryContext::new(CHILD_CONTEXT, active),
+            ],
+            vec![
+                BoundaryDiscoveryTransition::new(ROOT_CONTEXT, ANGLE, CHILD_CONTEXT),
+                BoundaryDiscoveryTransition::new(CHILD_CONTEXT, ANGLE, CHILD_CONTEXT),
+            ],
+        ),
+        vec![],
+    )
+}
+
+fn angle_rendering() -> TextualRenderingPolicy {
+    TextualRenderingPolicy::new(vec![
+        ContextualTextualPolicy::new(ROOT_CONTEXT, Some(WHITESPACE), None),
+        ContextualTextualPolicy::new(CHILD_CONTEXT, Some(WHITESPACE), None),
+    ])
+}
+
 fn entry<Root: Clone>(
     type_id: EncodedTypeId<Root>,
     rule: StructuralRule<Root>,
@@ -1114,6 +1142,91 @@ fn downstream_typed_record_uses_the_same_shared_evaluator() {
         value.field::<DownstreamDeclarationRole>(),
         Some(FieldValue::Declaration(found)) if found.encoded_id() == &assigned
     ));
+}
+
+#[test]
+fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
+    let expected = type_id(FirstFixtureRoot::Universal, &[7, 1]);
+    let rule = StructuralRule::AdjacentApplicationDelimited(
+        AdjacentApplicationDelimitedRule::new(
+            ANGLE,
+            SharedDescriptor::Reference(AtomDescriptor::with_case(AtomCase::PascalCase)),
+            SharedDescriptor::Reference(AtomDescriptor::with_case(AtomCase::PascalCase)),
+            1,
+            Some(2),
+        )
+        .expect("adjacent application rule"),
+    );
+    let constructor = EncodedConstructorId::under(&expected, 1);
+    let profile = profile();
+    let table = AddressedStructuralTable::seal(
+        TableIdentityPayload::new(
+            TargetLayoutIdentity::derive(b"adjacent angle application layout"),
+            profile.identity(),
+            StructuralVocabularyIdentity::language(b"adjacent angle application vocabulary"),
+            angle_discovery(),
+            angle_rendering(),
+            vec![entry(expected.clone(), rule)],
+        ),
+        &profile,
+    )
+    .expect("adjacent angle table");
+    let result = encoded(FirstFixtureRoot::Universal, &[7, 2]);
+    let vector = encoded(FirstFixtureRoot::Universal, &[7, 3]);
+    let error = encoded(FirstFixtureRoot::Universal, &[7, 4]);
+    let mut bindings = Bindings::default();
+    bindings.reference(0, 6, "Result", &result);
+    bindings.reference(7, 13, "Vector", &vector);
+    bindings.reference(14, 19, "Error", &error);
+    let evaluator = StructuralEvaluator::new(&table).expect("adjacent evaluator");
+
+    let decoded = evaluator
+        .decode_text(&expected, "Result<Vector Error>", &bindings)
+        .expect("strict bare angle application");
+    assert!(matches!(
+        decoded.field::<AdjacentApplicationDelimitedHead>(),
+        Some(FieldValue::Reference(found)) if found.encoded_id() == &result
+    ));
+    assert!(matches!(
+        decoded.field::<AdjacentApplicationDelimitedItems>(),
+        Some(FieldValue::Repeated(items))
+            if matches!(items.as_slice(), [
+                FieldValue::Reference(first),
+                FieldValue::Reference(second),
+            ] if first.encoded_id() == &vector && second.encoded_id() == &error)
+    ));
+    assert!(
+        evaluator
+            .decode_text(&expected, "Result.<Vector Error>", &bindings)
+            .is_err(),
+        "the obsolete dot spelling is not a compatibility path"
+    );
+
+    let items = FieldValue::Repeated(vec![
+        FieldValue::Reference(ResolvedReference::new(vector.clone())),
+        FieldValue::Reference(ResolvedReference::new(error.clone())),
+    ]);
+    let mut reflected = StructuralValue::record(constructor);
+    reflected
+        .insert::<AdjacentApplicationDelimitedRoot>(FieldValue::OrderedProduct)
+        .expect("adjacent root");
+    reflected
+        .insert::<AdjacentApplicationDelimitedHead>(FieldValue::Reference(ResolvedReference::new(
+            result,
+        )))
+        .expect("adjacent head");
+    reflected
+        .insert::<AdjacentApplicationDelimitedBody>(FieldValue::Delimited(Box::new(items.clone())))
+        .expect("adjacent body");
+    reflected
+        .insert::<AdjacentApplicationDelimitedItems>(items)
+        .expect("adjacent items");
+    assert_eq!(
+        evaluator
+            .encode_text(&expected, &reflected.finish(), &bindings)
+            .expect("adjacent angle application encoding"),
+        "Result<Vector Error>"
+    );
 }
 
 #[test]

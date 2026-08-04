@@ -380,6 +380,7 @@ fn descriptor_requires_landing<Root>(descriptor: &SharedDescriptor<Root>) -> boo
         SharedDescriptor::Literal(_)
         | SharedDescriptor::OrderedProduct(_)
         | SharedDescriptor::OrderedSequence(_)
+        | SharedDescriptor::AdjacentSequence(_)
         | SharedDescriptor::Application { .. }
         | SharedDescriptor::InlineApplication { .. }
         | SharedDescriptor::Alternation(_)
@@ -513,6 +514,7 @@ pub enum DescriptorKind {
     Delegate,
     OrderedProduct,
     OrderedSequence,
+    AdjacentSequence,
     Application,
     InlineApplication,
     Alternation,
@@ -534,6 +536,7 @@ impl DescriptorKind {
             SharedDescriptor::Delegate { .. } => Self::Delegate,
             SharedDescriptor::OrderedProduct(_) => Self::OrderedProduct,
             SharedDescriptor::OrderedSequence(_) => Self::OrderedSequence,
+            SharedDescriptor::AdjacentSequence(_) => Self::AdjacentSequence,
             SharedDescriptor::Application { .. } => Self::Application,
             SharedDescriptor::InlineApplication { .. } => Self::InlineApplication,
             SharedDescriptor::Alternation(_) => Self::Alternation,

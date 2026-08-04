@@ -843,7 +843,9 @@ where
                 if let SharedDescriptor::Application { operator, .. } = state.descriptor(root)? {
                     operators.insert(self.operator_text(*operator)?);
                 }
-                if let SharedDescriptor::OrderedSequence(sequence) = state.descriptor(root)? {
+                if let SharedDescriptor::OrderedSequence(sequence)
+                | SharedDescriptor::AdjacentSequence(sequence) = state.descriptor(root)?
+                {
                     let Some(second) = sequence.members().get(1) else {
                         continue;
                     };
@@ -1043,6 +1045,10 @@ where
                 self.decode_ordered_sequence(sequence, input, state, names, active, scope)?;
                 Ok(DraftFieldValue::OrderedProduct)
             }
+            SharedDescriptor::AdjacentSequence(sequence) => {
+                self.decode_ordered_sequence(sequence, input, state, names, active, scope)?;
+                Ok(DraftFieldValue::OrderedProduct)
+            }
             SharedDescriptor::Application {
                 operator,
                 head,
@@ -1170,7 +1176,7 @@ where
                 };
                 if !matches!(
                     self.profile.definition(*carrier)?.trigger,
-                    Trigger::Carrier { .. }
+                    Trigger::Carrier { .. } | Trigger::CurlyText
                 ) {
                     return Err(DecodeError::BlockKindMismatch {
                         expected: "carrier trigger",
@@ -1825,6 +1831,14 @@ where
                     .collect::<Result<Vec<_>, _>>()?;
                 self.join_product_members(rendered, context)
             }
+            (SharedDescriptor::AdjacentSequence(sequence), FieldValue::OrderedProduct) => {
+                let rendered = sequence
+                    .members()
+                    .iter()
+                    .map(|role| self.encode_role(*role, descriptors, mirror, resolver, context))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rendered.concat())
+            }
             (
                 SharedDescriptor::Application {
                     operator,
@@ -2093,19 +2107,11 @@ where
             .for_context(context)
             .ok_or(EncodeError::NonCanonicalSpelling)?;
         let carrier = policy.carrier().ok_or(EncodeError::NonCanonicalSpelling)?;
-        let Trigger::Carrier {
-            opening,
-            closing,
-            escape,
-        } = &self.profile.definition(carrier)?.trigger
-        else {
-            return Err(EncodeError::NonCanonicalSpelling);
-        };
-        let body = escape.as_ref().map_or_else(
-            || body.to_owned(),
-            |escape| body.replace(closing, &format!("{escape}{closing}")),
-        );
-        Ok(format!("{opening}{body}{closing}"))
+        self.profile
+            .definition(carrier)?
+            .trigger
+            .render_text_carrier(body)
+            .ok_or(EncodeError::NonCanonicalSpelling)
     }
 
     fn encode_carrier_with(
@@ -2113,19 +2119,11 @@ where
         carrier: TriggerIdentifier,
         body: &str,
     ) -> Result<String, EncodeError<Root>> {
-        let Trigger::Carrier {
-            opening,
-            closing,
-            escape,
-        } = &self.profile.definition(carrier)?.trigger
-        else {
-            return Err(EncodeError::ShapeMismatch);
-        };
-        let body = escape.as_ref().map_or_else(
-            || body.to_owned(),
-            |escape| body.replace(closing, &format!("{escape}{closing}")),
-        );
-        Ok(format!("{opening}{body}{closing}"))
+        self.profile
+            .definition(carrier)?
+            .trigger
+            .render_text_carrier(body)
+            .ok_or(EncodeError::ShapeMismatch)
     }
 
     fn bare_dotted(value: &str) -> bool {

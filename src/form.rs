@@ -208,6 +208,13 @@ pub enum SharedDescriptor<Root> {
     OrderedProduct(OrderedProduct),
     /// A fixed ordered sequence of mixed lexical and bounded typed positions.
     OrderedSequence(OrderedSequence),
+    /// A fixed ordered sequence whose member spellings are adjacent rather
+    /// than separated by contextual whitespace.
+    ///
+    /// This owns bare structural applications such as `Vector<Ordered>`: the
+    /// first typed position ends at the second position's boundary, then the
+    /// writer concatenates the two rendered positions exactly.
+    AdjacentSequence(OrderedSequence),
     Application {
         operator: TriggerIdentifier,
         head: StableRoleId,
@@ -366,6 +373,10 @@ role!(ApplicationDelimitedRoot, 5);
 role!(ApplicationDelimitedHead, 6);
 role!(ApplicationDelimitedBody, 7);
 role!(ApplicationDelimitedItems, 8);
+role!(AdjacentApplicationDelimitedRoot, 9);
+role!(AdjacentApplicationDelimitedHead, 10);
+role!(AdjacentApplicationDelimitedBody, 11);
+role!(AdjacentApplicationDelimitedItems, 12);
 
 /// One actual fixed-position rule with one root field.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
@@ -562,6 +573,98 @@ impl<Root> StructureRecord<Root> for ApplicationDelimitedRule<Root> {
     }
 }
 
+/// An actual record for an adjacent application whose payload is a delimited
+/// repeated list: `head<item …>`. The adjacent root is distinct from dotted
+/// application so the writer cannot silently reintroduce a separator.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct AdjacentApplicationDelimitedRule<Root> {
+    application: Position<AdjacentApplicationDelimitedRoot, Root>,
+    head: Position<AdjacentApplicationDelimitedHead, Root>,
+    body: Position<AdjacentApplicationDelimitedBody, Root>,
+    items: Position<AdjacentApplicationDelimitedItems, Root>,
+}
+
+impl<Root> AdjacentApplicationDelimitedRule<Root> {
+    /// Construct the four typed fields of a bare `head<items…>` application.
+    pub fn new(
+        boundary: TriggerIdentifier,
+        head: SharedDescriptor<Root>,
+        element: SharedDescriptor<Root>,
+        minimum: u64,
+        maximum: Option<u64>,
+    ) -> Result<Self, AuthoringError> {
+        let items_role = StableRoleId::for_role::<AdjacentApplicationDelimitedItems>();
+        Ok(Self {
+            application: Position::try_new(SharedDescriptor::AdjacentSequence(
+                OrderedSequence::try_new::<AdjacentApplicationDelimitedHead>()?
+                    .then::<AdjacentApplicationDelimitedBody>()?,
+            ))?,
+            head: Position::try_new(head)?,
+            body: Position::try_new(SharedDescriptor::Delimited {
+                boundary,
+                content: items_role,
+            })?,
+            items: Position::try_new(SharedDescriptor::Repeated {
+                minimum,
+                maximum,
+                element: Box::new(element),
+            })?,
+        })
+    }
+
+    pub fn application(&self) -> &Position<AdjacentApplicationDelimitedRoot, Root> {
+        &self.application
+    }
+
+    pub fn head(&self) -> &Position<AdjacentApplicationDelimitedHead, Root> {
+        &self.head
+    }
+
+    pub fn body(&self) -> &Position<AdjacentApplicationDelimitedBody, Root> {
+        &self.body
+    }
+
+    pub fn items(&self) -> &Position<AdjacentApplicationDelimitedItems, Root> {
+        &self.items
+    }
+}
+
+impl<Root> StructureRecord<Root> for AdjacentApplicationDelimitedRule<Root> {
+    type View<'record>
+        = FieldLink<
+        'record,
+        AdjacentApplicationDelimitedRoot,
+        Root,
+        FieldLink<
+            'record,
+            AdjacentApplicationDelimitedHead,
+            Root,
+            FieldLink<
+                'record,
+                AdjacentApplicationDelimitedBody,
+                Root,
+                FieldLink<'record, AdjacentApplicationDelimitedItems, Root, FieldEnd>,
+            >,
+        >,
+    >
+    where
+        Root: 'record;
+
+    fn root_role(&self) -> StableRoleId {
+        self.application.role()
+    }
+
+    fn fields(&self) -> Self::View<'_> {
+        FieldLink::new(
+            &self.application,
+            FieldLink::new(
+                &self.head,
+                FieldLink::new(&self.body, FieldLink::new(&self.items, FieldEnd)),
+            ),
+        )
+    }
+}
+
 /// The kernel convenience coproduct of built-in rule shapes. Its branches select
 /// data only; decode, encode, boundary work, and proof remain in shared
 /// machinery.
@@ -570,6 +673,7 @@ pub enum StructuralRule<Root> {
     Unary(UnaryRule<Root>),
     Application(ApplicationRule<Root>),
     ApplicationDelimited(ApplicationDelimitedRule<Root>),
+    AdjacentApplicationDelimited(AdjacentApplicationDelimitedRule<Root>),
 }
 
 impl<Root> StructuralRule<Root> {
@@ -578,6 +682,7 @@ impl<Root> StructuralRule<Root> {
             Self::Unary(rule) => rule.root_role(),
             Self::Application(rule) => rule.root_role(),
             Self::ApplicationDelimited(rule) => rule.root_role(),
+            Self::AdjacentApplicationDelimited(rule) => rule.root_role(),
         }
     }
 }
@@ -663,10 +768,28 @@ pub type ApplicationDelimitedFieldView<'record, Root> = FieldLink<
     >,
 >;
 
+pub type AdjacentApplicationDelimitedFieldView<'record, Root> = FieldLink<
+    'record,
+    AdjacentApplicationDelimitedRoot,
+    Root,
+    FieldLink<
+        'record,
+        AdjacentApplicationDelimitedHead,
+        Root,
+        FieldLink<
+            'record,
+            AdjacentApplicationDelimitedBody,
+            Root,
+            FieldLink<'record, AdjacentApplicationDelimitedItems, Root, FieldEnd>,
+        >,
+    >,
+>;
+
 pub enum StructuralRuleView<'record, Root> {
     Unary(FieldLink<'record, UnaryRoot, Root, FieldEnd>),
     Application(ApplicationFieldView<'record, Root>),
     ApplicationDelimited(ApplicationDelimitedFieldView<'record, Root>),
+    AdjacentApplicationDelimited(AdjacentApplicationDelimitedFieldView<'record, Root>),
 }
 
 impl<Root> BorrowedFieldView<Root> for StructuralRuleView<'_, Root> {
@@ -675,6 +798,7 @@ impl<Root> BorrowedFieldView<Root> for StructuralRuleView<'_, Root> {
             Self::Unary(fields) => fields.expose(visitor),
             Self::Application(fields) => fields.expose(visitor),
             Self::ApplicationDelimited(fields) => fields.expose(visitor),
+            Self::AdjacentApplicationDelimited(fields) => fields.expose(visitor),
         }
     }
 }
@@ -695,6 +819,9 @@ impl<Root> StructureRecord<Root> for StructuralRule<Root> {
             Self::Application(rule) => StructuralRuleView::Application(rule.fields()),
             Self::ApplicationDelimited(rule) => {
                 StructuralRuleView::ApplicationDelimited(rule.fields())
+            }
+            Self::AdjacentApplicationDelimited(rule) => {
+                StructuralRuleView::AdjacentApplicationDelimited(rule.fields())
             }
         }
     }

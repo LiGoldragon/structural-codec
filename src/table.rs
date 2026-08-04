@@ -381,7 +381,7 @@ where
                     ),
                     "carrier" => matches!(
                         profile.definition(identifier)?.trigger,
-                        Trigger::Carrier { .. }
+                        Trigger::Carrier { .. } | Trigger::CurlyText
                     ),
                     _ => unreachable!("fixed policy trigger kinds"),
                 };
@@ -531,7 +531,7 @@ where
             SharedDescriptor::Carrier { carrier, content } => {
                 if !matches!(
                     profile.definition(*carrier)?.trigger,
-                    Trigger::Carrier { .. }
+                    Trigger::Carrier { .. } | Trigger::CurlyText
                 ) {
                     return Err(TableError::WrongTriggerKind {
                         identifier: *carrier,
@@ -572,7 +572,8 @@ where
                     Self::validate_descriptor(child, roles, profile, block_discovery)?;
                 }
             }
-            SharedDescriptor::OrderedSequence(sequence) => {
+            SharedDescriptor::OrderedSequence(sequence)
+            | SharedDescriptor::AdjacentSequence(sequence) => {
                 let mut members = std::collections::BTreeSet::new();
                 for role in sequence.members() {
                     if !members.insert(*role) {

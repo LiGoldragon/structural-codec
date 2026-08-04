@@ -2,16 +2,16 @@ use std::collections::BTreeMap;
 
 use crate::fixture::{BRACE_BOUNDARY, COMMIT_SEQUENCE, FixtureBuilder};
 use crate::{
-    AcceptedDecodeForm, AddressedStructuralTable, ApplicationDelimitedRule, AtomCase,
+    AcceptedDecodeForm, AddressedStructuralTable, AdjacentApplicationDelimitedRule, AtomCase,
     AtomDescriptor, ConstructorCodec, DecodeError, DecodeFormId, EncodedConstructorId,
     EncodedLanguage, SharedDescriptor, StructuralEntry, StructuralEvaluator, StructuralRule,
     StructuralVocabularyIdentity, TableIdentityPayload, TargetLayoutIdentity,
 };
 use name_table::{IdentifierNamespace, NameTable};
 use raw_discovery::{
-    BlockPrefixAttachment, BlockPrefixRule, BlockTree, BlockTreeDiscoveryConfiguration,
+    BlockTree, BlockTreeDiscoveryConfiguration,
     BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext, BoundaryDiscoveryContextIdentifier,
-    BoundaryDiscoveryTransition, CharacterClass, CharacterSet, DiscoveredBlockTree,
+    BoundaryDiscoveryTransition, CharacterSet, DiscoveredBlockTree,
     ProfileRevision, TokenProfileData, Trigger, TriggerDefinition, TriggerIdentifier, TriggerSet,
 };
 
@@ -48,10 +48,9 @@ fn enclosing_nested_tree_is_complete_before_typed_interior_refusal() {
 }
 
 #[test]
-fn configured_angle_boundary_decodes_and_encodes_without_a_compatibility_delimiter() {
+fn configured_angle_boundary_decodes_and_encodes_as_a_bare_application() {
     let angle = TriggerIdentifier::new(11);
-    let dot = TriggerIdentifier::new(12);
-    let whitespace = TriggerIdentifier::new(13);
+    let whitespace = TriggerIdentifier::new(12);
     let profile = TokenProfileData::new(
         ProfileRevision::new(41),
         vec![
@@ -63,19 +62,13 @@ fn configured_angle_boundary_decodes_and_encodes_without_a_compatibility_delimit
                 },
             },
             TriggerDefinition {
-                identifier: dot,
-                trigger: Trigger::Application {
-                    glyph: ".".to_owned(),
-                },
-            },
-            TriggerDefinition {
                 identifier: whitespace,
                 trigger: Trigger::Whitespace {
                     canonical_spelling: " ".to_owned(),
                 },
             },
         ],
-        TriggerSet::new(vec![angle, dot, whitespace]),
+        TriggerSet::new(vec![angle, whitespace]),
         CharacterSet::from_text(""),
     )
     .seal()
@@ -90,14 +83,10 @@ fn configured_angle_boundary_decodes_and_encodes_without_a_compatibility_delimit
             )],
             vec![BoundaryDiscoveryTransition::new(root, angle, root)],
         ),
-        vec![BlockPrefixAttachment::new(
-            angle,
-            BlockPrefixRule::new(".", CharacterClass::AsciiAlphabetic),
-        )],
+        vec![],
     );
-    let rule = StructuralRule::ApplicationDelimited(
-        ApplicationDelimitedRule::new(
-            dot,
+    let rule = StructuralRule::AdjacentApplicationDelimited(
+        AdjacentApplicationDelimitedRule::new(
             angle,
             SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
             SharedDescriptor::Atom(AtomDescriptor::with_case(AtomCase::PascalCase)),
@@ -134,13 +123,13 @@ fn configured_angle_boundary_decodes_and_encodes_without_a_compatibility_delimit
     let evaluator = StructuralEvaluator::new(&table).expect("table evaluator");
     let mut names = NameTable::new(IdentifierNamespace::Fixture);
     let value = evaluator
-        .decode_text(COMMIT_SEQUENCE, "CommitSequence.<Integer>", &mut names)
+        .decode_text(COMMIT_SEQUENCE, "CommitSequence<Integer>", &mut names)
         .expect("angle decode");
 
     assert_eq!(
         evaluator
             .encode_text(COMMIT_SEQUENCE, &value, &names)
             .expect("angle encode"),
-        "CommitSequence.<Integer>"
+        "CommitSequence<Integer>"
     );
 }

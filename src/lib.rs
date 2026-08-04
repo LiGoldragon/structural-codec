@@ -59,13 +59,15 @@ pub use error::{
 };
 pub use evaluator::StructuralEvaluator;
 pub use form::{
-    ApplicationDelimitedBody, ApplicationDelimitedFieldView, ApplicationDelimitedHead,
-    ApplicationDelimitedItems, ApplicationDelimitedRoot, ApplicationDelimitedRule,
-    ApplicationFieldView, ApplicationHead, ApplicationPayload, ApplicationRoot, ApplicationRule,
-    AtomDescriptor, BorrowedFieldView, DelegationPayload, FieldEnd, FieldLink, FieldVisitor,
-    ForeignLeafId, LeafCodec, OrderedProduct, OrderedSequence, Position, RuleCoproduct,
-    RuleCoproductView, SharedDescriptor, StructuralRule, StructuralRuleView, StructureRecord,
-    UnaryRoot, UnaryRule,
+    AdjacentApplicationDelimitedBody, AdjacentApplicationDelimitedFieldView,
+    AdjacentApplicationDelimitedHead, AdjacentApplicationDelimitedItems,
+    AdjacentApplicationDelimitedRoot, AdjacentApplicationDelimitedRule, ApplicationDelimitedBody,
+    ApplicationDelimitedFieldView, ApplicationDelimitedHead, ApplicationDelimitedItems,
+    ApplicationDelimitedRoot, ApplicationDelimitedRule, ApplicationFieldView, ApplicationHead,
+    ApplicationPayload, ApplicationRoot, ApplicationRule, AtomDescriptor, BorrowedFieldView,
+    DelegationPayload, FieldEnd, FieldLink, FieldVisitor, ForeignLeafId, LeafCodec, OrderedProduct,
+    OrderedSequence, Position, RuleCoproduct, RuleCoproductView, SharedDescriptor, StructuralRule,
+    StructuralRuleView, StructureRecord, UnaryRoot, UnaryRule,
 };
 pub use ids::{DecodeFormId, EncodedConstructorId, EncodedTypeId, FieldRole, StableRoleId};
 pub use landing::{

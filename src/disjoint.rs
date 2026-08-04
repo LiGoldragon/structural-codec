@@ -86,7 +86,8 @@ fn outer<'a, Root>(
         SharedDescriptor::Delimited { boundary, .. }
         | SharedDescriptor::ItemBoundary { boundary, .. } => Ok(Outer::Boundary(*boundary)),
         SharedDescriptor::Carrier { carrier, .. } => Ok(Outer::Carrier(*carrier)),
-        SharedDescriptor::OrderedSequence(sequence) => Ok(Outer::Sequence(sequence)),
+        SharedDescriptor::OrderedSequence(sequence)
+        | SharedDescriptor::AdjacentSequence(sequence) => Ok(Outer::Sequence(sequence)),
         SharedDescriptor::Leaf(_)
         | SharedDescriptor::Repeated { .. }
         | SharedDescriptor::OrderedProduct(_) => Ok(Outer::Opaque),
@@ -431,7 +432,8 @@ fn directly_guaranteed_nonempty<Root>(
         SharedDescriptor::Repeated {
             minimum, element, ..
         } => *minimum > 0 && directly_guaranteed_nonempty(element, roles),
-        SharedDescriptor::OrderedSequence(sequence) => sequence.members().iter().any(|role| {
+        SharedDescriptor::OrderedSequence(sequence)
+        | SharedDescriptor::AdjacentSequence(sequence) => sequence.members().iter().any(|role| {
             roles
                 .get(role)
                 .is_some_and(|member| directly_guaranteed_nonempty(member, roles))
