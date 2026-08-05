@@ -97,8 +97,8 @@ dependencies = [
 
 [[package]]
 name = "content-identity"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/content-identity.git?rev=fdf2db1d5a9e8ea52d24d39a03833c3e6885c355#fdf2db1d5a9e8ea52d24d39a03833c3e6885c355"
+version = "0.5.0"
+source = "git+https://github.com/LiGoldragon/content-identity.git?rev=896b21e17f31b66d0802bff899b4b60acea9c0f1#896b21e17f31b66d0802bff899b4b60acea9c0f1"
 dependencies = [
  "blake3",
  "rkyv",
@@ -206,9 +206,9 @@ dependencies = [
 [[package]]
 name = "name-table"
 version = "0.3.0"
-source = "git+https://github.com/LiGoldragon/name-table.git?rev=50cb4bb53ae2dc4f2516f6912be328ef98ae49f8#50cb4bb53ae2dc4f2516f6912be328ef98ae49f8"
+source = "git+https://github.com/LiGoldragon/name-table.git?rev=a22f48d8040ab9235f3552ad8654ff8e27b8157d#a22f48d8040ab9235f3552ad8654ff8e27b8157d"
 dependencies = [
- "content-identity 0.4.0",
+ "content-identity 0.5.0",
  "rkyv",
  "thiserror",
 ]
