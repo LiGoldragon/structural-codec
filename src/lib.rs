@@ -39,25 +39,21 @@ pub mod authoring;
 pub mod codec;
 pub mod conformance;
 pub mod disjoint;
-pub mod encoded_form;
 pub mod error;
 pub mod evaluator;
 pub mod form;
 pub mod ids;
-pub mod landing;
 pub mod names;
 pub mod plan;
 pub mod table;
-pub mod textual_form;
 pub mod value;
 
 pub use codec::{AcceptedDecodeForm, ConstructorCodec, StructuralEntry};
 pub use conformance::{ConformanceError, ConformanceHarness, GeneratedCodec};
-pub use encoded_form::{Converted, EncodedConversion, EncodedForm};
-pub use error::{
-    AuthoringError, DecodeError, DisjointnessError, EncodeError, SingleChunkRequired, TableError,
+pub use error::{AuthoringError, DecodeError, DisjointnessError, EncodeError, TableError};
+pub use evaluator::{
+    StructuralEncoding, StructuralEvaluator, StructuralPlanning, TypedContextualDecoding,
 };
-pub use evaluator::StructuralEvaluator;
 pub use form::{
     AdjacentApplicationDelimitedBody, AdjacentApplicationDelimitedFieldView,
     AdjacentApplicationDelimitedHead, AdjacentApplicationDelimitedItems,
@@ -70,11 +66,6 @@ pub use form::{
     StructuralRuleView, StructureRecord, UnaryRoot, UnaryRule,
 };
 pub use ids::{DecodeFormId, EncodedConstructorId, EncodedTypeId, FieldRole, StableRoleId};
-pub use landing::{
-    DescriptorKind, LandingConstructorDeclaration, LandingDeclarationCatalog,
-    LandingFieldDeclaration, LandingShape, LandingShapeKind, LandingTypeDeclaration,
-    LanguageDeclaration, LanguageDeclarationError, VerifiedLandingClosure,
-};
 pub use name_table::{EncodedId, LocalEncodedId, TableAddress};
 pub use names::{
     DeclarationAssignment, DecodeNameBindings, EncodedNameResolver, NameOccurrence,
@@ -88,7 +79,6 @@ pub use table::{
     StructuralVocabularyIdentity, TableIdentityPayload, TargetLayoutDomain, TargetLayoutIdentity,
     TextualRenderingPolicy,
 };
-pub use textual_form::{ChunkName, TextChunk, Textual, TextualForm};
 pub use value::{
     FieldValue, RoleKeyedMirror, ScalarValue, SourceBoundedStructuralValue, StructuralValue,
     StructuralValueRecord,

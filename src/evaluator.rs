@@ -26,6 +26,43 @@ use crate::value::{
     FieldValue, RoleKeyedMirror, ScalarValue, SourceBoundedStructuralValue, StructuralValue,
 };
 
+/// Structural branch selection without declaration or reference allocation.
+pub trait StructuralPlanning<Root> {
+    fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        source: &str,
+        resolver: &Resolver,
+    ) -> Result<PlannedStructuralValue<Root>, DecodeError<Root>>;
+}
+
+/// Typed structural decoding under the table's sealed discovery contexts.
+pub trait TypedContextualDecoding<Root> {
+    fn decode_text<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        source: &str,
+        bindings: &Bindings,
+    ) -> Result<StructuralValue<Root>, DecodeError<Root>>;
+
+    fn decode_text_bounded<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        source: &str,
+        bindings: &Bindings,
+    ) -> Result<SourceBoundedStructuralValue<Root>, DecodeError<Root>>;
+}
+
+/// Canonical structural rendering under the table's sealed context policy.
+pub trait StructuralEncoding<Root> {
+    fn encode_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        value: &StructuralValue<Root>,
+        resolver: &Resolver,
+    ) -> Result<String, EncodeError<Root>>;
+}
+
 struct DescriptorCollector<Root> {
     fields: BTreeMap<StableRoleId, SharedDescriptor<Root>>,
 }
@@ -2149,5 +2186,59 @@ where
             Trigger::Application { glyph } | Trigger::Punctuation { glyph } => Ok(glyph),
             _ => Err(EncodeError::ShapeMismatch),
         }
+    }
+}
+
+impl<Root, Record> StructuralPlanning<Root> for StructuralEvaluator<'_, Root, Record>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
+    fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        source: &str,
+        resolver: &Resolver,
+    ) -> Result<PlannedStructuralValue<Root>, DecodeError<Root>> {
+        StructuralEvaluator::plan_text(self, expected, source, resolver)
+    }
+}
+
+impl<Root, Record> TypedContextualDecoding<Root> for StructuralEvaluator<'_, Root, Record>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
+    fn decode_text<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        source: &str,
+        bindings: &Bindings,
+    ) -> Result<StructuralValue<Root>, DecodeError<Root>> {
+        StructuralEvaluator::decode_text(self, expected, source, bindings)
+    }
+
+    fn decode_text_bounded<Bindings: DecodeNameBindings<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        source: &str,
+        bindings: &Bindings,
+    ) -> Result<SourceBoundedStructuralValue<Root>, DecodeError<Root>> {
+        StructuralEvaluator::decode_text_bounded(self, expected, source, bindings)
+    }
+}
+
+impl<Root, Record> StructuralEncoding<Root> for StructuralEvaluator<'_, Root, Record>
+where
+    Root: Clone + Ord,
+    Record: StructureRecord<Root>,
+{
+    fn encode_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+        &self,
+        expected: &EncodedTypeId<Root>,
+        value: &StructuralValue<Root>,
+        resolver: &Resolver,
+    ) -> Result<String, EncodeError<Root>> {
+        StructuralEvaluator::encode_text(self, expected, value, resolver)
     }
 }

@@ -257,9 +257,3 @@ pub enum TableError<Root> {
     #[error(transparent)]
     TokenProfile(#[from] TokenProfileError),
 }
-
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("the textual form carried {count} chunks; un-view requires exactly one")]
-pub struct SingleChunkRequired {
-    pub count: usize,
-}
