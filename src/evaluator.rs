@@ -1553,15 +1553,11 @@ where
         if let Some((body, _)) = carrier.take_carrier(self)? {
             *input = carrier;
             return match codec {
-                LeafCodec::Text | LeafCodec::PipeText => Ok(ScalarValue::Text(body)),
-                _ => Err(DecodeError::LeafNotFlattenable),
+                LeafCodec::Text => Ok(ScalarValue::Text(body)),
+                LeafCodec::Integer | LeafCodec::Float | LeafCodec::Boolean => {
+                    Err(DecodeError::LeafNotFlattenable)
+                }
             };
-        }
-        if matches!(codec, LeafCodec::PipeText) {
-            return Err(DecodeError::BlockKindMismatch {
-                expected: "pipe text",
-                found: "source",
-            });
         }
         let bound = input.take_bare(self, terminator, structural_stops)?;
         let text = input.text(bound);
@@ -1588,8 +1584,6 @@ where
                     "not a boolean keyword: {other}"
                 ))),
             },
-            LeafCodec::PipeText => unreachable!("pipe text returned before bare leaf parsing"),
-            LeafCodec::Foreign(_) => Err(DecodeError::LeafNotFlattenable),
         }
     }
 
@@ -1684,7 +1678,7 @@ where
                 }
                 Ok(DraftFieldValue::Literal(identifier.clone()))
             }
-            SharedDescriptor::Leaf(LeafCodec::Text | LeafCodec::PipeText) => {
+            SharedDescriptor::Leaf(LeafCodec::Text) => {
                 Ok(DraftFieldValue::Scalar(ScalarValue::Text(body.to_owned())))
             }
             _ => Err(DecodeError::BlockKindMismatch {
@@ -2095,9 +2089,7 @@ where
             (LeafCodec::Text, ScalarValue::Text(value)) if Self::bare_dotted(value) => {
                 Ok(value.clone())
             }
-            (LeafCodec::Text | LeafCodec::PipeText, ScalarValue::Text(value)) => {
-                self.encode_carrier(value, context)
-            }
+            (LeafCodec::Text, ScalarValue::Text(value)) => self.encode_carrier(value, context),
             _ => Err(EncodeError::ShapeMismatch),
         }
     }

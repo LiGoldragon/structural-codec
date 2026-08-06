@@ -65,7 +65,7 @@ pub use form::{
     ApplicationDelimitedFieldView, ApplicationDelimitedHead, ApplicationDelimitedItems,
     ApplicationDelimitedRoot, ApplicationDelimitedRule, ApplicationFieldView, ApplicationHead,
     ApplicationPayload, ApplicationRoot, ApplicationRule, AtomDescriptor, BorrowedFieldView,
-    DelegationPayload, FieldEnd, FieldLink, FieldVisitor, ForeignLeafId, LeafCodec, OrderedProduct,
+    DelegationPayload, FieldEnd, FieldLink, FieldVisitor, LeafCodec, OrderedProduct,
     OrderedSequence, Position, RuleCoproduct, RuleCoproductView, SharedDescriptor, StructuralRule,
     StructuralRuleView, StructureRecord, UnaryRoot, UnaryRule,
 };

@@ -59,24 +59,7 @@ pub enum LeafCodec {
     Float,
     Text,
     Boolean,
-    PipeText,
-    Foreign(ForeignLeafId),
 }
-
-#[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
-)]
-pub struct ForeignLeafId(u16);
 
 /// An ordered product of real typed positions.
 ///
@@ -245,8 +228,8 @@ pub enum SharedDescriptor<Root> {
         content: StableRoleId,
     },
     /// A carrier whose captured body is interpreted by another typed
-    /// descriptor. This differs from a `PipeText` leaf: a carried declaration
-    /// or reference remains an encoded identity rather than becoming text.
+    /// descriptor. A carried declaration or reference remains an encoded
+    /// identity rather than becoming text.
     Carrier {
         carrier: TriggerIdentifier,
         #[rkyv(omit_bounds)]
