@@ -9,8 +9,9 @@
 use std::marker::PhantomData;
 
 use name_table::EncodedId;
-use raw_discovery::{Atom, AtomCase, TriggerIdentifier};
+use raw_discovery::TriggerIdentifier;
 
+use crate::atom::{Atom, AtomCase};
 use crate::error::AuthoringError;
 use crate::ids::{EncodedTypeId, FieldRole, RoleIdentity, StableRoleId};
 

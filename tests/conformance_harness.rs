@@ -4,7 +4,7 @@ use crate::{
     StructuralValue, UnaryRoot,
 };
 use name_table::{Identifier, IdentifierNamespace, Name, NameResolver, NameTable};
-use raw_discovery::{Atom, AtomCase};
+use crate::{Atom, AtomCase};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IndependentlyAuthoredPascal {

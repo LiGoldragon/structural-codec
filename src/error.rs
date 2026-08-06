@@ -2,8 +2,8 @@
 
 use content_identity::ArchiveError;
 use raw_discovery::{
-    BlockDiscoveryError, BoundaryDiscoveryContextIdentifier, RecognizeError, SourceBound,
-    TokenProfileError, TriggerIdentifier,
+    BlockDiscoveryError, BoundaryDiscoveryContextIdentifier, SourceBound, TokenProfileError,
+    TriggerIdentifier,
 };
 
 use crate::form::DelegationPayload;
@@ -63,8 +63,6 @@ pub enum DecodeError<Root> {
     TokenProfile(#[from] TokenProfileError),
     #[error(transparent)]
     BlockDiscovery(#[from] BlockDiscoveryError),
-    #[error(transparent)]
-    Recognition(#[from] RecognizeError),
     #[error("no structural entry for expected type {0:?}")]
     UnknownType(EncodedTypeId<Root>),
     #[error("expected {expected} block, found {found}")]

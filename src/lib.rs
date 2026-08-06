@@ -35,6 +35,8 @@
 //! ```
 //!
 
+mod atom;
+
 pub mod authoring;
 pub mod codec;
 pub mod conformance;
@@ -48,6 +50,7 @@ pub mod plan;
 pub mod table;
 pub mod value;
 
+pub use atom::{Atom, AtomCase};
 pub use codec::{AcceptedDecodeForm, ConstructorCodec, StructuralEntry};
 pub use conformance::{ConformanceError, ConformanceHarness, GeneratedCodec};
 pub use error::{AuthoringError, DecodeError, DisjointnessError, EncodeError, TableError};
@@ -72,11 +75,9 @@ pub use names::{
     ResolvedReference,
 };
 pub use plan::{PlannedFieldValue, PlannedName, PlannedStructuralValue};
-pub use raw_discovery::AtomCase;
 pub use table::{
     AddressedStructuralTable, ArchivedTablePayload, ContextualTextualPolicy,
-    FixtureVocabularyDomain, StructuralTableDomain, StructuralVocabularyDomain,
-    StructuralVocabularyIdentity, TableIdentityPayload, TargetLayoutDomain, TargetLayoutIdentity,
+    StructuralVocabularyIdentity, TableIdentityPayload, TargetLayoutIdentity,
     TextualRenderingPolicy,
 };
 pub use value::{

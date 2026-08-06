@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use raw_discovery::{
-    Atom, BlockTree, BoundaryDiscoveryContextIdentifier, BoundaryReader, DiscoveredBlock,
+    BlockTree, BoundaryDiscoveryContextIdentifier, BoundaryReader, DiscoveredBlock,
     DiscoveredBlockTree, SealedTokenProfile, SourceBound, Trigger, TriggerIdentifier,
     TriggerMatchKind,
 };
 
+use crate::atom::Atom;
 use crate::codec::StructuralEntry;
 use crate::error::{DecodeError, EncodeError};
 use crate::form::{

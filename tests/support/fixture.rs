@@ -149,7 +149,7 @@ impl FixtureBuilder {
             Self::unary(
                 FIELD,
                 SharedDescriptor::Atom(AtomDescriptor::with_case(
-                    raw_discovery::AtomCase::PascalCase,
+                    crate::AtomCase::PascalCase,
                 )),
             ),
             Self::unary(
@@ -176,10 +176,10 @@ impl FixtureBuilder {
                 APPLICATION_OPERATOR,
                 self.boundary,
                 SharedDescriptor::Atom(AtomDescriptor::with_case(
-                    raw_discovery::AtomCase::PascalCase,
+                    crate::AtomCase::PascalCase,
                 )),
                 SharedDescriptor::Atom(AtomDescriptor::with_case(
-                    raw_discovery::AtomCase::PascalCase,
+                    crate::AtomCase::PascalCase,
                 )),
                 1,
                 Some(1),
@@ -194,7 +194,7 @@ impl FixtureBuilder {
             ApplicationRule::new(
                 APPLICATION_OPERATOR,
                 SharedDescriptor::Atom(AtomDescriptor::with_case(
-                    raw_discovery::AtomCase::PascalCase,
+                    crate::AtomCase::PascalCase,
                 )),
                 SharedDescriptor::Delegate {
                     target: FIELD,

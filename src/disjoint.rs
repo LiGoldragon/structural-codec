@@ -33,7 +33,7 @@ fn fields<Root: Clone, Record: StructureRecord<Root>>(
 
 enum Outer<'a, Root> {
     Named(
-        Option<raw_discovery::AtomCase>,
+        Option<crate::atom::AtomCase>,
         &'a [name_table::EncodedId<Root>],
     ),
     Literal(&'a name_table::EncodedId<Root>),

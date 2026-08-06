@@ -7,11 +7,10 @@
 
 use std::collections::BTreeMap;
 
-use content_identity::{ArchiveError, ContentHash, DomainSeparation, HashDomain, LayoutVersion};
+use content_identity::{ArchiveError, ContentAddressedHash};
 use raw_discovery::{
     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryContextIdentifier,
-    SealedBlockTreeDiscoveryConfiguration, SealedTokenProfile, TokenProfileDomain, Trigger,
-    TriggerIdentifier,
+    SealedBlockTreeDiscoveryConfiguration, SealedTokenProfile, Trigger, TriggerIdentifier,
 };
 
 use crate::codec::StructuralEntry;
@@ -21,55 +20,24 @@ use crate::form::{
 };
 use crate::ids::{EncodedTypeId, StableRoleId};
 
-/// The target encoded-layout identity is a domain-typed content address. There
+/// The target encoded-layout identity is a pure-content address. There
 /// is no raw byte wrapper, default value, or zero placeholder.
-pub struct TargetLayoutDomain;
-impl HashDomain for TargetLayoutDomain {
-    fn separation() -> DomainSeparation {
-        DomainSeparation::Contextual {
-            context: "structural-codec 2026 target encoded layout",
-            layout: LayoutVersion::new(1),
-        }
-    }
-}
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TargetLayoutIdentity(ContentHash<TargetLayoutDomain>);
+pub struct TargetLayoutIdentity(ContentAddressedHash);
 
 impl TargetLayoutIdentity {
     /// Derive the identity from canonical target-layout data. Raw digest bytes
     /// have no constructor at this boundary, so zero/default placeholders are
     /// unrepresentable.
     pub fn derive(layout_data: &[u8]) -> Self {
-        Self(ContentHash::derive(layout_data))
-    }
-}
-
-/// Domain for production structuretree vocabularies.
-pub struct StructuralVocabularyDomain;
-impl HashDomain for StructuralVocabularyDomain {
-    fn separation() -> DomainSeparation {
-        DomainSeparation::Contextual {
-            context: "structural-codec 2026 structuretree vocabulary",
-            layout: LayoutVersion::new(1),
-        }
-    }
-}
-
-/// A separate optional domain for explicitly test-only sidecars.
-pub struct FixtureVocabularyDomain;
-impl HashDomain for FixtureVocabularyDomain {
-    fn separation() -> DomainSeparation {
-        DomainSeparation::Contextual {
-            context: "structural-codec 2026 test vocabulary",
-            layout: LayoutVersion::new(1),
-        }
+        Self(ContentAddressedHash::derive(layout_data))
     }
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StructuralVocabularyIdentity {
-    Language(ContentHash<StructuralVocabularyDomain>),
-    Fixture(ContentHash<FixtureVocabularyDomain>),
+    Language(ContentAddressedHash),
+    Fixture(ContentAddressedHash),
 }
 
 /// Canonical source spellings selected explicitly for one discovery context.
@@ -141,14 +109,19 @@ impl StructuralVocabularyIdentity {
     /// Derive a production vocabulary identity from its canonical archived
     /// vocabulary bytes.
     pub fn language(data: &[u8]) -> Self {
-        Self::Language(ContentHash::derive(data))
+        Self::Language(ContentAddressedHash::derive(data))
+    }
+
+    /// Derive an explicitly test-only vocabulary identity.
+    pub fn fixture(data: &[u8]) -> Self {
+        Self::Fixture(ContentAddressedHash::derive(data))
     }
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct TableIdentityPayload<Root, Record = StructuralRule<Root>> {
     target_layout_identity: TargetLayoutIdentity,
-    token_profile_identity: ContentHash<TokenProfileDomain>,
+    token_profile_identity: ContentAddressedHash,
     vocabulary_identity: StructuralVocabularyIdentity,
     block_discovery: BlockTreeDiscoveryConfiguration,
     textual_rendering: TextualRenderingPolicy,
@@ -157,11 +130,10 @@ pub struct TableIdentityPayload<Root, Record = StructuralRule<Root>> {
 
 impl<Root: Ord, Record> TableIdentityPayload<Root, Record> {
     /// Assemble the complete, typed identity pre-image for a structural table.
-    /// Content hashes cross this boundary in their typed domains; raw digest
-    /// bytes have no authoring path.
+    /// Content addresses cross this boundary without a raw-byte authoring path.
     pub fn new(
         target_layout_identity: TargetLayoutIdentity,
-        token_profile_identity: ContentHash<TokenProfileDomain>,
+        token_profile_identity: ContentAddressedHash,
         vocabulary_identity: StructuralVocabularyIdentity,
         block_discovery: BlockTreeDiscoveryConfiguration,
         textual_rendering: TextualRenderingPolicy,
@@ -179,23 +151,10 @@ impl<Root: Ord, Record> TableIdentityPayload<Root, Record> {
     }
 }
 
-/// The table archives pass-one boundary data and the descriptor vocabulary.
-/// Its identity layout advances independently of the unchanged
-/// structural-value layout.
-pub struct StructuralTableDomain;
-impl HashDomain for StructuralTableDomain {
-    fn separation() -> DomainSeparation {
-        DomainSeparation::Contextual {
-            context: "structural-codec 2026 addressed structural table",
-            layout: LayoutVersion::new(13),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct AddressedStructuralTable<Root, Record = StructuralRule<Root>> {
     payload: TableIdentityPayload<Root, Record>,
-    identity: ContentHash<StructuralTableDomain>,
+    identity: ContentAddressedHash,
     profile: SealedTokenProfile,
     block_discovery: SealedBlockTreeDiscoveryConfiguration,
 }
@@ -205,7 +164,7 @@ pub struct AddressedStructuralTable<Root, Record = StructuralRule<Root>> {
 /// no grammar behavior and only writes canonical identity bytes.
 pub trait ArchivedTablePayload {
     #[doc(hidden)]
-    fn table_identity(&self) -> Result<ContentHash<StructuralTableDomain>, ArchiveError>;
+    fn table_identity(&self) -> Result<ContentAddressedHash, ArchiveError>;
 }
 
 impl<Root, Record> ArchivedTablePayload for TableIdentityPayload<Root, Record>
@@ -222,10 +181,10 @@ where
             >,
         >,
 {
-    fn table_identity(&self) -> Result<ContentHash<StructuralTableDomain>, ArchiveError> {
+    fn table_identity(&self) -> Result<ContentAddressedHash, ArchiveError> {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
             .map_err(|error| ArchiveError::Serialize(error.to_string()))?;
-        Ok(ContentHash::derive(bytes.as_ref()))
+        Ok(ContentAddressedHash::derive(bytes.as_ref()))
     }
 }
 
@@ -255,7 +214,7 @@ where
         })
     }
 
-    pub fn identity(&self) -> ContentHash<StructuralTableDomain> {
+    pub fn identity(&self) -> ContentAddressedHash {
         self.identity
     }
     pub fn entry(&self, expected: &EncodedTypeId<Root>) -> Option<&StructuralEntry<Root, Record>> {
@@ -264,7 +223,7 @@ where
             .iter()
             .find(|entry| entry.encoded_type() == expected)
     }
-    pub fn token_profile_identity(&self) -> ContentHash<TokenProfileDomain> {
+    pub fn token_profile_identity(&self) -> ContentAddressedHash {
         self.payload.token_profile_identity
     }
 
