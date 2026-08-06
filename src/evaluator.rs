@@ -31,7 +31,7 @@ use crate::value::{
 
 /// Structural branch selection without declaration or reference allocation.
 pub trait StructuralPlanning<Root> {
-    fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn plan_text<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         source: &str,
@@ -58,7 +58,7 @@ pub trait TypedContextualDecoding<Root> {
 
 /// Canonical structural rendering under the table's sealed context policy.
 pub trait StructuralEncoding<Root> {
-    fn encode_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn encode_text<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         value: &StructuralValue<Root>,
@@ -218,7 +218,7 @@ impl<Root: Clone> DraftFieldValue<Root> {
     }
 }
 
-trait EvaluationNames<Root>: EncodedNameResolver<Root> {
+trait EvaluationNames<Root>: EncodedNameResolver {
     fn declaration(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>>;
 
     fn reference(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>>;
@@ -228,9 +228,9 @@ struct BoundEvaluationNames<'bindings, Bindings: ?Sized> {
     bindings: &'bindings Bindings,
 }
 
-impl<Root, Bindings> EncodedNameResolver<Root> for BoundEvaluationNames<'_, Bindings>
+impl<Bindings> EncodedNameResolver for BoundEvaluationNames<'_, Bindings>
 where
-    Bindings: DecodeNameBindings<Root> + ?Sized,
+    Bindings: EncodedNameResolver + ?Sized,
 {
     fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName> {
         self.bindings.resolve(encoded_name)
@@ -264,9 +264,9 @@ struct PlanningEvaluationNames<'resolver, Resolver: ?Sized> {
     resolver: &'resolver Resolver,
 }
 
-impl<Root, Resolver> EncodedNameResolver<Root> for PlanningEvaluationNames<'_, Resolver>
+impl<Resolver> EncodedNameResolver for PlanningEvaluationNames<'_, Resolver>
 where
-    Resolver: EncodedNameResolver<Root> + ?Sized,
+    Resolver: EncodedNameResolver + ?Sized,
 {
     fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName> {
         self.resolver.resolve(encoded_name)
@@ -275,7 +275,7 @@ where
 
 impl<Root, Resolver> EvaluationNames<Root> for PlanningEvaluationNames<'_, Resolver>
 where
-    Resolver: EncodedNameResolver<Root> + ?Sized,
+    Resolver: EncodedNameResolver + ?Sized,
 {
     fn declaration(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>> {
         Ok(DraftName::Planned(PlannedName::new(
@@ -758,7 +758,7 @@ where
     /// Fixed literal and exclusion vocabulary still resolve through immutable
     /// encoded nameentity. The returned role-keyed tree retains exact source
     /// spellings and bounds only at this source boundary.
-    pub fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    pub fn plan_text<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         source: &str,
@@ -1544,7 +1544,7 @@ where
 
     fn verify_draft_spelling(
         &self,
-        resolver: &(impl EncodedNameResolver<Root> + ?Sized),
+        resolver: &(impl EncodedNameResolver + ?Sized),
         name: &DraftName,
         source_spelling: &str,
         bound: SourceBound,
@@ -1711,7 +1711,7 @@ where
 
     /// Render directly from descriptor data under explicit table-owned context
     /// policy. No raw `Block` renderer participates in textual output.
-    pub fn encode_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    pub fn encode_text<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         value: &StructuralValue<Root>,
@@ -1728,7 +1728,7 @@ where
     /// The internal encoder carries the current recursive discovery context.
     /// Only the public entry point selects root; recursive descriptor arms
     /// retain or transition this context explicitly.
-    fn encode_type_at_context<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn encode_type_at_context<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         value: &StructuralValue<Root>,
@@ -1759,7 +1759,7 @@ where
         )
     }
 
-    fn encode_role<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn encode_role<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         role: StableRoleId,
         descriptors: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
@@ -1776,7 +1776,7 @@ where
         self.encode_descriptor(descriptor, value, descriptors, mirror, resolver, context)
     }
 
-    fn encode_descriptor<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn encode_descriptor<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         descriptor: &SharedDescriptor<Root>,
         value: &FieldValue<Root>,
@@ -2008,7 +2008,7 @@ where
         Ok(rendered.join(canonical_spelling))
     }
 
-    fn encode_repeated_role<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn encode_repeated_role<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         role: StableRoleId,
         descriptors: &BTreeMap<StableRoleId, SharedDescriptor<Root>>,
@@ -2045,7 +2045,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn encode_repeated_values<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn encode_repeated_values<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         element: &SharedDescriptor<Root>,
         minimum: u64,
@@ -2086,7 +2086,7 @@ where
     }
 
     fn resolve_text(
-        resolver: &(impl EncodedNameResolver<Root> + ?Sized),
+        resolver: &(impl EncodedNameResolver + ?Sized),
         encoded_name: &EncodedName,
     ) -> Result<String, EncodeError<Root>> {
         resolver
@@ -2178,7 +2178,7 @@ where
     Root: Clone + Ord,
     Record: StructureRecord<Root>,
 {
-    fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn plan_text<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         source: &str,
@@ -2217,7 +2217,7 @@ where
     Root: Clone + Ord,
     Record: StructureRecord<Root>,
 {
-    fn encode_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
+    fn encode_text<Resolver: EncodedNameResolver + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,
         value: &StructuralValue<Root>,

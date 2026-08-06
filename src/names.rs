@@ -96,7 +96,7 @@ impl<Language> Clone for ResolvedReference<Language> {
 ///
 /// A consumer may back this with any verified current or historical snapshot.
 /// Capsule pin composition is intentionally outside this interface.
-pub trait EncodedNameResolver<Root> {
+pub trait EncodedNameResolver {
     fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName>;
 }
 
@@ -105,7 +105,7 @@ pub trait EncodedNameResolver<Root> {
 /// The two methods cannot be substituted for one another. Both receive the
 /// exact source bound so a caller can distinguish equal spellings in different
 /// modules without this crate inventing module or Capsule context.
-pub trait DecodeNameBindings<Root>: EncodedNameResolver<Root> {
+pub trait DecodeNameBindings<Root>: EncodedNameResolver {
     fn declaration_assignment(
         &self,
         occurrence: NameOccurrence<'_>,

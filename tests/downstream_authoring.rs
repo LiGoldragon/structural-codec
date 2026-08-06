@@ -694,7 +694,7 @@ impl<Root: Clone + Ord> Bindings<Root> {
     }
 }
 
-impl<Root: Ord> EncodedNameResolver<Root> for Bindings<Root> {
+impl<Root: Ord> EncodedNameResolver for Bindings<Root> {
     fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName> {
         self.spellings.get(encoded_name)
     }
@@ -1706,7 +1706,7 @@ fn rejected_alternation_candidate_cannot_leak_its_unique_planned_declaration() {
         &profile,
     )
     .expect("rejected-candidate table");
-    let mut bindings = Bindings::default();
+    let mut bindings = Bindings::<FirstFixtureLanguage>::default();
     bindings.spelling(&rejected_payload, "Bad");
     bindings.spelling(&selected_head, "Unique");
     bindings.spelling(&selected_payload, "Good");

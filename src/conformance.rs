@@ -19,10 +19,7 @@ pub trait GeneratedCodec<Root>: Sized {
         bindings: &impl DecodeNameBindings<Root>,
     ) -> Result<Self, DecodeError<Root>>;
 
-    fn encode(
-        &self,
-        resolver: &impl EncodedNameResolver<Root>,
-    ) -> Result<String, EncodeError<Root>>;
+    fn encode(&self, resolver: &impl EncodedNameResolver) -> Result<String, EncodeError<Root>>;
 
     fn to_structural(&self) -> StructuralValue<Root>;
 }
