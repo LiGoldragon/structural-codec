@@ -1,7 +1,7 @@
 //! Sealed, vocabulary-identified tables of archived typed rule records.
 //!
-//! A downstream vocabulary supplies its root enum and complete encoded-ID
-//! chains, authors real typed records, and seals those records as one table.
+//! A downstream language supplies opaque encoded names, authors real typed
+//! records, and seals those records as one table.
 //! The shared evaluator and prover operate only on `StructureRecord` field
 //! data; records carry no language-specific grammar algorithm.
 

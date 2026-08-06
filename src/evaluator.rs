@@ -1,6 +1,8 @@
 //! The one shared, source-bounded evaluator over archived typed records.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use name_table::{EncodedName, TextualName};
 use std::rc::Rc;
 
 use raw_discovery::{
@@ -124,16 +126,16 @@ impl<Root: Clone> DraftStructuralValue<Root> {
 }
 
 #[derive(Clone)]
-enum DraftName<Root> {
-    Bound(legacy_name_table::EncodedId<Root>),
+enum DraftName {
+    Bound(EncodedName),
     Planned(PlannedName),
 }
 
 #[derive(Clone)]
 enum DraftFieldValue<Root> {
-    Declaration(DraftName<Root>),
-    Reference(DraftName<Root>),
-    Literal(legacy_name_table::EncodedId<Root>),
+    Declaration(DraftName),
+    Reference(DraftName),
+    Literal(EncodedName),
     Scalar(ScalarValue),
     OrderedProduct,
     Delimited(Rc<DraftFieldValue<Root>>),
@@ -149,11 +151,11 @@ enum DraftFieldValue<Root> {
 impl<Root: Clone> DraftFieldValue<Root> {
     fn materialize(self) -> FieldValue<Root> {
         match self {
-            Self::Declaration(DraftName::Bound(encoded_id)) => {
-                FieldValue::Declaration(DeclarationAssignment::new(encoded_id))
+            Self::Declaration(DraftName::Bound(encoded_name)) => {
+                FieldValue::Declaration(DeclarationAssignment::new(encoded_name))
             }
-            Self::Reference(DraftName::Bound(encoded_id)) => {
-                FieldValue::Reference(ResolvedReference::new(encoded_id))
+            Self::Reference(DraftName::Bound(encoded_name)) => {
+                FieldValue::Reference(ResolvedReference::new(encoded_name))
             }
             Self::Declaration(DraftName::Planned(_)) | Self::Reference(DraftName::Planned(_)) => {
                 unreachable!("bound decoding cannot contain planned names")
@@ -217,15 +219,9 @@ impl<Root: Clone> DraftFieldValue<Root> {
 }
 
 trait EvaluationNames<Root>: EncodedNameResolver<Root> {
-    fn declaration(
-        &self,
-        occurrence: NameOccurrence<'_>,
-    ) -> Result<DraftName<Root>, DecodeError<Root>>;
+    fn declaration(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>>;
 
-    fn reference(
-        &self,
-        occurrence: NameOccurrence<'_>,
-    ) -> Result<DraftName<Root>, DecodeError<Root>>;
+    fn reference(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>>;
 }
 
 struct BoundEvaluationNames<'bindings, Bindings: ?Sized> {
@@ -236,11 +232,8 @@ impl<Root, Bindings> EncodedNameResolver<Root> for BoundEvaluationNames<'_, Bind
 where
     Bindings: DecodeNameBindings<Root> + ?Sized,
 {
-    fn resolve(
-        &self,
-        encoded_id: &legacy_name_table::EncodedId<Root>,
-    ) -> Option<&legacy_name_table::Name> {
-        self.bindings.resolve(encoded_id)
+    fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName> {
+        self.bindings.resolve(encoded_name)
     }
 }
 
@@ -248,26 +241,20 @@ impl<Root, Bindings> EvaluationNames<Root> for BoundEvaluationNames<'_, Bindings
 where
     Bindings: DecodeNameBindings<Root> + ?Sized,
 {
-    fn declaration(
-        &self,
-        occurrence: NameOccurrence<'_>,
-    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+    fn declaration(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>> {
         let bound = occurrence.bound();
         self.bindings
             .declaration_assignment(occurrence)
-            .map(DeclarationAssignment::into_encoded_id)
+            .map(DeclarationAssignment::into_encoded_name)
             .map(DraftName::Bound)
             .ok_or(DecodeError::MissingDeclarationAssignment { bound })
     }
 
-    fn reference(
-        &self,
-        occurrence: NameOccurrence<'_>,
-    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+    fn reference(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>> {
         let bound = occurrence.bound();
         self.bindings
             .reference_resolution(occurrence)
-            .map(ResolvedReference::into_encoded_id)
+            .map(ResolvedReference::into_encoded_name)
             .map(DraftName::Bound)
             .ok_or(DecodeError::UnresolvedReference { bound })
     }
@@ -281,11 +268,8 @@ impl<Root, Resolver> EncodedNameResolver<Root> for PlanningEvaluationNames<'_, R
 where
     Resolver: EncodedNameResolver<Root> + ?Sized,
 {
-    fn resolve(
-        &self,
-        encoded_id: &legacy_name_table::EncodedId<Root>,
-    ) -> Option<&legacy_name_table::Name> {
-        self.resolver.resolve(encoded_id)
+    fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName> {
+        self.resolver.resolve(encoded_name)
     }
 }
 
@@ -293,20 +277,14 @@ impl<Root, Resolver> EvaluationNames<Root> for PlanningEvaluationNames<'_, Resol
 where
     Resolver: EncodedNameResolver<Root> + ?Sized,
 {
-    fn declaration(
-        &self,
-        occurrence: NameOccurrence<'_>,
-    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+    fn declaration(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>> {
         Ok(DraftName::Planned(PlannedName::new(
             occurrence.spelling(),
             occurrence.bound(),
         )))
     }
 
-    fn reference(
-        &self,
-        occurrence: NameOccurrence<'_>,
-    ) -> Result<DraftName<Root>, DecodeError<Root>> {
+    fn reference(&self, occurrence: NameOccurrence<'_>) -> Result<DraftName, DecodeError<Root>> {
         Ok(DraftName::Planned(PlannedName::new(
             occurrence.spelling(),
             occurrence.bound(),
@@ -778,7 +756,7 @@ where
     /// or accepting identities for declaration and reference occurrences.
     ///
     /// Fixed literal and exclusion vocabulary still resolve through immutable
-    /// encoded identity. The returned role-keyed tree retains exact source
+    /// encoded nameentity. The returned role-keyed tree retains exact source
     /// spellings and bounds only at this source boundary.
     pub fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
@@ -985,16 +963,16 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                if excluded.iter().any(|encoded_id| {
+                if excluded.iter().any(|encoded_name| {
                     names
-                        .resolve(encoded_id)
+                        .resolve(encoded_name)
                         .is_some_and(|name| name.as_str() == atom.text())
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 let assignment = names.declaration(NameOccurrence::new(atom.text(), bound))?;
                 self.verify_draft_spelling(names, &assignment, atom.text(), bound)?;
-                if matches!(&assignment, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                if matches!(&assignment, DraftName::Bound(encoded_name) if excluded.contains(encoded_name))
                 {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
@@ -1025,16 +1003,16 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                if excluded.iter().any(|encoded_id| {
+                if excluded.iter().any(|encoded_name| {
                     names
-                        .resolve(encoded_id)
+                        .resolve(encoded_name)
                         .is_some_and(|name| name.as_str() == atom.text())
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 let reference = names.reference(NameOccurrence::new(atom.text(), bound))?;
                 self.verify_draft_spelling(names, &reference, atom.text(), bound)?;
-                if matches!(&reference, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                if matches!(&reference, DraftName::Bound(encoded_name) if excluded.contains(encoded_name))
                 {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
@@ -1049,13 +1027,13 @@ where
                 let spelling =
                     names
                         .resolve(identifier)
-                        .ok_or_else(|| DecodeError::UnknownEncodedName {
-                            encoded_id: identifier.clone(),
+                        .ok_or(DecodeError::UnknownEncodedName {
+                            encoded_name: *identifier,
                         })?;
                 if spelling.as_str() != atom.text() {
                     return Err(DecodeError::LiteralMismatch);
                 }
-                Ok(DraftFieldValue::Literal(identifier.clone()))
+                Ok(DraftFieldValue::Literal(*identifier))
             }
             SharedDescriptor::Leaf(codec) => Ok(DraftFieldValue::Scalar(self.decode_leaf(
                 codec,
@@ -1567,19 +1545,18 @@ where
     fn verify_draft_spelling(
         &self,
         resolver: &(impl EncodedNameResolver<Root> + ?Sized),
-        name: &DraftName<Root>,
+        name: &DraftName,
         source_spelling: &str,
         bound: SourceBound,
     ) -> Result<(), DecodeError<Root>> {
-        let DraftName::Bound(encoded_id) = name else {
+        let DraftName::Bound(encoded_name) = name else {
             return Ok(());
         };
-        let resolved =
-            resolver
-                .resolve(encoded_id)
-                .ok_or_else(|| DecodeError::UnknownEncodedName {
-                    encoded_id: encoded_id.clone(),
-                })?;
+        let resolved = resolver
+            .resolve(encoded_name)
+            .ok_or(DecodeError::UnknownEncodedName {
+                encoded_name: *encoded_name,
+            })?;
         if resolved.as_str() != source_spelling {
             return Err(DecodeError::NameBindingMismatch { bound });
         }
@@ -1665,16 +1642,16 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                if excluded.iter().any(|encoded_id| {
+                if excluded.iter().any(|encoded_name| {
                     names
-                        .resolve(encoded_id)
+                        .resolve(encoded_name)
                         .is_some_and(|name| name.as_str() == body)
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 let assignment = names.declaration(NameOccurrence::new(body, bound))?;
                 self.verify_draft_spelling(names, &assignment, body, bound)?;
-                if matches!(&assignment, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                if matches!(&assignment, DraftName::Bound(encoded_name) if excluded.contains(encoded_name))
                 {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
@@ -1695,16 +1672,16 @@ where
                 if !form.accepts(&atom) {
                     return Err(DecodeError::CaseMismatch);
                 }
-                if excluded.iter().any(|encoded_id| {
+                if excluded.iter().any(|encoded_name| {
                     names
-                        .resolve(encoded_id)
+                        .resolve(encoded_name)
                         .is_some_and(|name| name.as_str() == body)
                 }) {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
                 let reference = names.reference(NameOccurrence::new(body, bound))?;
                 self.verify_draft_spelling(names, &reference, body, bound)?;
-                if matches!(&reference, DraftName::Bound(encoded_id) if excluded.contains(encoded_id))
+                if matches!(&reference, DraftName::Bound(encoded_name) if excluded.contains(encoded_name))
                 {
                     return Err(DecodeError::ExcludedNameIdentity { bound });
                 }
@@ -1714,13 +1691,13 @@ where
                 let spelling =
                     names
                         .resolve(identifier)
-                        .ok_or_else(|| DecodeError::UnknownEncodedName {
-                            encoded_id: identifier.clone(),
+                        .ok_or(DecodeError::UnknownEncodedName {
+                            encoded_name: *identifier,
                         })?;
                 if spelling.as_str() != body {
                     return Err(DecodeError::LiteralMismatch);
                 }
-                Ok(DraftFieldValue::Literal(identifier.clone()))
+                Ok(DraftFieldValue::Literal(*identifier))
             }
             SharedDescriptor::Leaf(LeafCodec::Text) => {
                 Ok(DraftFieldValue::Scalar(ScalarValue::Text(body.to_owned())))
@@ -1810,28 +1787,28 @@ where
     ) -> Result<String, EncodeError<Root>> {
         match (descriptor, value) {
             (SharedDescriptor::Declaration(_), FieldValue::Declaration(assignment)) => {
-                Self::resolve_text(resolver, assignment.encoded_id())
+                Self::resolve_text(resolver, assignment.encoded_name())
             }
             (
                 SharedDescriptor::DeclarationExcluding { excluded, .. },
                 FieldValue::Declaration(assignment),
             ) => {
-                if excluded.contains(assignment.encoded_id()) {
+                if excluded.contains(assignment.encoded_name()) {
                     return Err(EncodeError::ExcludedNameIdentity);
                 }
-                Self::resolve_text(resolver, assignment.encoded_id())
+                Self::resolve_text(resolver, assignment.encoded_name())
             }
             (SharedDescriptor::Reference(_), FieldValue::Reference(reference)) => {
-                Self::resolve_text(resolver, reference.encoded_id())
+                Self::resolve_text(resolver, reference.encoded_name())
             }
             (
                 SharedDescriptor::ReferenceExcluding { excluded, .. },
                 FieldValue::Reference(reference),
             ) => {
-                if excluded.contains(reference.encoded_id()) {
+                if excluded.contains(reference.encoded_name()) {
                     return Err(EncodeError::ExcludedNameIdentity);
                 }
-                Self::resolve_text(resolver, reference.encoded_id())
+                Self::resolve_text(resolver, reference.encoded_name())
             }
             (SharedDescriptor::Literal(expected), FieldValue::Literal(identifier))
                 if expected == identifier =>
@@ -2110,13 +2087,13 @@ where
 
     fn resolve_text(
         resolver: &(impl EncodedNameResolver<Root> + ?Sized),
-        encoded_id: &legacy_name_table::EncodedId<Root>,
+        encoded_name: &EncodedName,
     ) -> Result<String, EncodeError<Root>> {
         resolver
-            .resolve(encoded_id)
+            .resolve(encoded_name)
             .map(|name| name.as_str().to_owned())
-            .ok_or_else(|| EncodeError::UnknownEncodedName {
-                encoded_id: encoded_id.clone(),
+            .ok_or(EncodeError::UnknownEncodedName {
+                encoded_name: *encoded_name,
             })
     }
 

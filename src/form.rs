@@ -8,7 +8,7 @@
 
 use std::marker::PhantomData;
 
-use legacy_name_table::EncodedId;
+use name_table::EncodedName;
 use raw_discovery::TriggerIdentifier;
 
 use crate::atom::{Atom, AtomCase};
@@ -169,19 +169,19 @@ pub enum SharedDescriptor<Root> {
     /// reserved words as ordinary declarations.
     DeclarationExcluding {
         atom: AtomDescriptor,
-        excluded: Vec<EncodedId<Root>>,
+        excluded: Vec<EncodedName>,
     },
     /// A lookup-only reference whose resolved identity must not be one of the
     /// reserved identities.
     ///
-    /// Exclusion is checked on the encoded identity after lookup; no spelling
+    /// Exclusion is checked on the encoded nameentity after lookup; no spelling
     /// comparison or allocation path is introduced.
     ReferenceExcluding {
         atom: AtomDescriptor,
-        excluded: Vec<EncodedId<Root>>,
+        excluded: Vec<EncodedName>,
     },
-    /// A fixed vocabulary word identified by its complete encoded-ID chain.
-    Literal(EncodedId<Root>),
+    /// A fixed vocabulary word identified by its complete encoded chain.
+    Literal(EncodedName),
     Leaf(LeafCodec),
     Delegate {
         target: EncodedTypeId<Root>,

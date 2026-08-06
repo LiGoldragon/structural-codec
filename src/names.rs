@@ -2,9 +2,9 @@
 //!
 //! The translator is the sole allocator. This crate accepts already-issued
 //! declaration assignments and already-resolved references; it cannot turn a
-//! spelling into a new encoded ID.
+//! spelling into a new encoded name.
 
-use legacy_name_table::{EncodedId, Name};
+use name_table::{EncodedName, TextualName};
 use raw_discovery::SourceBound;
 
 /// One name occurrence in the source currently being evaluated.
@@ -30,68 +30,74 @@ impl<'source> NameOccurrence<'source> {
 
 /// A translator-issued identity assigned to a declaration occurrence.
 #[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
+    rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
-pub struct DeclarationAssignment<Root>(EncodedId<Root>);
+pub struct DeclarationAssignment<Language> {
+    encoded_name: EncodedName,
+    marker: std::marker::PhantomData<Language>,
+}
 
-impl<Root> DeclarationAssignment<Root> {
-    pub fn new(encoded_id: EncodedId<Root>) -> Self {
-        Self(encoded_id)
+impl<Language> DeclarationAssignment<Language> {
+    pub const fn new(encoded_name: EncodedName) -> Self {
+        Self {
+            encoded_name,
+            marker: std::marker::PhantomData,
+        }
     }
 
-    pub fn encoded_id(&self) -> &EncodedId<Root> {
-        &self.0
+    pub const fn encoded_name(&self) -> &EncodedName {
+        &self.encoded_name
     }
 
-    pub fn into_encoded_id(self) -> EncodedId<Root> {
-        self.0
+    pub const fn into_encoded_name(self) -> EncodedName {
+        self.encoded_name
+    }
+}
+
+impl<Language> Clone for DeclarationAssignment<Language> {
+    fn clone(&self) -> Self {
+        Self::new(self.encoded_name)
     }
 }
 
 /// An identity returned by lookup-only reference resolution.
 #[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
+    rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
-pub struct ResolvedReference<Root>(EncodedId<Root>);
+pub struct ResolvedReference<Language> {
+    encoded_name: EncodedName,
+    marker: std::marker::PhantomData<Language>,
+}
 
-impl<Root> ResolvedReference<Root> {
-    pub fn new(encoded_id: EncodedId<Root>) -> Self {
-        Self(encoded_id)
+impl<Language> ResolvedReference<Language> {
+    pub const fn new(encoded_name: EncodedName) -> Self {
+        Self {
+            encoded_name,
+            marker: std::marker::PhantomData,
+        }
     }
 
-    pub fn encoded_id(&self) -> &EncodedId<Root> {
-        &self.0
+    pub const fn encoded_name(&self) -> &EncodedName {
+        &self.encoded_name
     }
 
-    pub fn into_encoded_id(self) -> EncodedId<Root> {
-        self.0
+    pub const fn into_encoded_name(self) -> EncodedName {
+        self.encoded_name
     }
 }
 
-/// Read-only spelling projection for already-issued encoded IDs.
+impl<Language> Clone for ResolvedReference<Language> {
+    fn clone(&self) -> Self {
+        Self::new(self.encoded_name)
+    }
+}
+
+/// Read-only spelling projection for already-issued encoded names.
 ///
 /// A consumer may back this with any verified current or historical snapshot.
 /// Capsule pin composition is intentionally outside this interface.
 pub trait EncodedNameResolver<Root> {
-    fn resolve(&self, encoded_id: &EncodedId<Root>) -> Option<&Name>;
+    fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName>;
 }
 
 /// Typed inputs used while decoding declaration and reference positions.

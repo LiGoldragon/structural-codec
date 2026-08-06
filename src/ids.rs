@@ -1,67 +1,70 @@
-//! Opaque encoded-ID-chain carriers and non-erased field roles.
+//! Opaque encoded-name carriers and non-erased field roles.
 
 use std::marker::PhantomData;
 
-use legacy_name_table::EncodedId;
+use name_table::EncodedName;
 
 /// A production-compatible encoded type identity.
 ///
-/// The caller supplies the root enum. The complete, non-empty module-local
-/// chain is retained; this crate has no flat or component-local projection.
+/// `Language` distinguishes type families at compile time only. The runtime
+/// identity is one opaque authority-issued `EncodedName`.
 #[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
+    rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
-pub struct EncodedTypeId<Root>(EncodedId<Root>);
+pub struct EncodedTypeId<Language> {
+    encoded_name: EncodedName,
+    marker: PhantomData<Language>,
+}
 
-impl<Root> EncodedTypeId<Root> {
-    /// Carry a translator-issued encoded ID as a structural type identity.
-    pub fn new(encoded_id: EncodedId<Root>) -> Self {
-        Self(encoded_id)
+impl<Language> EncodedTypeId<Language> {
+    /// Carry an authority-issued encoded name as a structural type identity.
+    pub const fn new(encoded_name: EncodedName) -> Self {
+        Self {
+            encoded_name,
+            marker: PhantomData,
+        }
     }
 
-    /// The complete root-fronted encoded-ID chain.
-    pub fn encoded_id(&self) -> &EncodedId<Root> {
-        &self.0
+    /// The opaque authority-issued encoded name.
+    pub const fn encoded_name(&self) -> &EncodedName {
+        &self.encoded_name
     }
 
-    /// Recover the complete root-fronted encoded-ID chain.
-    pub fn into_encoded_id(self) -> EncodedId<Root> {
-        self.0
+    /// Recover the opaque authority-issued encoded name.
+    pub const fn into_encoded_name(self) -> EncodedName {
+        self.encoded_name
+    }
+}
+
+impl<Language> Clone for EncodedTypeId<Language> {
+    fn clone(&self) -> Self {
+        Self::new(self.encoded_name)
     }
 }
 
 /// A constructor identity permanently associated with its owning encoded type.
 ///
-/// The local constructor number is meaningful only under the complete owning
-/// encoded-ID chain. It never replaces or flattens that chain.
+/// The local constructor number is meaningful only under its owning encoded
+/// type. It never replaces that type identity.
 #[derive(
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    Ord,
-    PartialEq,
-    PartialOrd,
+    rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
 )]
-pub struct EncodedConstructorId<Root> {
-    type_id: EncodedTypeId<Root>,
+pub struct EncodedConstructorId<Language> {
+    type_id: EncodedTypeId<Language>,
     local: u16,
 }
 
-impl<Root: Clone> EncodedConstructorId<Root> {
-    pub fn under(type_id: &EncodedTypeId<Root>, local: u16) -> Self {
+impl<Language> Clone for EncodedConstructorId<Language> {
+    fn clone(&self) -> Self {
+        Self {
+            type_id: self.type_id.clone(),
+            local: self.local,
+        }
+    }
+}
+
+impl<Language> EncodedConstructorId<Language> {
+    pub fn under(type_id: &EncodedTypeId<Language>, local: u16) -> Self {
         Self {
             type_id: type_id.clone(),
             local,
@@ -69,8 +72,8 @@ impl<Root: Clone> EncodedConstructorId<Root> {
     }
 }
 
-impl<Root> EncodedConstructorId<Root> {
-    pub fn type_id(&self) -> &EncodedTypeId<Root> {
+impl<Language> EncodedConstructorId<Language> {
+    pub fn type_id(&self) -> &EncodedTypeId<Language> {
         &self.type_id
     }
 

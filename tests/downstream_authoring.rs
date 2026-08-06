@@ -1,9 +1,9 @@
-//! Public contract witnesses for translator-issued encoded-ID chains.
+//! Public contract witnesses for translator-issued encoded chains.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use legacy_name_table::{EncodedId, LocalEncodedId, Name};
+use name_table::{EncodedName, TextualName};
 use raw_discovery::{
     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext,
     BoundaryDiscoveryContextIdentifier, BoundaryDiscoveryTransition, RawProfile,
@@ -44,10 +44,7 @@ const CHILD_CONTEXT: BoundaryDiscoveryContextIdentifier =
     PartialEq,
     PartialOrd,
 )]
-enum FirstFixtureRoot {
-    Universal,
-    Rust,
-}
+struct FirstFixtureLanguage;
 
 #[derive(
     rkyv::Archive,
@@ -61,11 +58,7 @@ enum FirstFixtureRoot {
     PartialEq,
     PartialOrd,
 )]
-enum SecondFixtureRoot {
-    Authored,
-    Fixed,
-    Future,
-}
+struct SecondFixtureLanguage;
 
 #[derive(
     rkyv::Archive,
@@ -344,7 +337,7 @@ struct LexicalSequenceRecord<Root> {
 }
 
 impl<Root: Clone> LexicalSequenceRecord<Root> {
-    fn new(keyword: EncodedId<Root>) -> Self {
+    fn new(keyword: EncodedName) -> Self {
         let sequence = OrderedSequence::try_new::<SequenceKeywordRole>()
             .and_then(OrderedSequence::then::<SequenceDeclarationRole>)
             .expect("two distinct lexical positions");
@@ -394,7 +387,7 @@ struct DerivedFutureRecord<Root> {
 }
 
 impl<Root: Clone> DerivedFutureRecord<Root> {
-    fn new(keyword: EncodedId<Root>) -> Self {
+    fn new(keyword: EncodedName) -> Self {
         Self {
             future_or_value: Position::try_new(SharedDescriptor::Alternation(vec![
                 SharedDescriptor::InlineApplication {
@@ -431,9 +424,9 @@ struct RejectedCandidateRecord<Root> {
 
 impl<Root: Clone> RejectedCandidateRecord<Root> {
     fn new(
-        rejected_payload: EncodedId<Root>,
-        selected_head: EncodedId<Root>,
-        selected_payload: EncodedId<Root>,
+        rejected_payload: EncodedName,
+        selected_head: EncodedName,
+        selected_payload: EncodedName,
     ) -> Self {
         Self {
             selected: Position::try_new(SharedDescriptor::Alternation(vec![
@@ -477,7 +470,7 @@ struct GenericDelimitedContentRecord<Root> {
 }
 
 impl<Root: Clone> GenericDelimitedContentRecord<Root> {
-    fn new(keyword: EncodedId<Root>) -> Self {
+    fn new(keyword: EncodedName) -> Self {
         let content = OrderedSequence::try_new::<DelimitedSequenceKeywordRole>()
             .and_then(OrderedSequence::then::<DelimitedSequenceDeclarationRole>)
             .expect("two content positions");
@@ -536,7 +529,7 @@ struct ApplicationBoundaryRecord<Root> {
 }
 
 impl<Root: Clone> ApplicationBoundaryRecord<Root> {
-    fn new(literal: EncodedId<Root>) -> Self {
+    fn new(literal: EncodedName) -> Self {
         let sequence = OrderedSequence::try_new::<ApplicationBoundaryRepeatedRole>()
             .and_then(OrderedSequence::then::<ApplicationBoundaryLiteralRole>)
             .expect("application repetition and following literal roles are distinct");
@@ -595,7 +588,7 @@ struct AmbiguousSequenceRecord<Root> {
 }
 
 impl<Root: Clone> AmbiguousSequenceRecord<Root> {
-    fn new(keyword: EncodedId<Root>, literal: EncodedId<Root>) -> Self {
+    fn new(keyword: EncodedName, literal: EncodedName) -> Self {
         let application = || SharedDescriptor::InlineApplication {
             operator: APPLICATION,
             head: Box::new(SharedDescriptor::Literal(keyword.clone())),
@@ -655,11 +648,12 @@ type ProductFixtureRule<Root> = RuleCoproduct<
 >;
 
 struct Bindings<Root> {
-    declarations: BTreeMap<(usize, usize), (String, EncodedId<Root>)>,
-    references: BTreeMap<(usize, usize), (String, EncodedId<Root>)>,
-    spellings: BTreeMap<EncodedId<Root>, Name>,
+    declarations: BTreeMap<(usize, usize), (String, EncodedName)>,
+    references: BTreeMap<(usize, usize), (String, EncodedName)>,
+    spellings: BTreeMap<EncodedName, TextualName>,
     declaration_queries: Cell<usize>,
     reference_queries: Cell<usize>,
+    marker: std::marker::PhantomData<Root>,
 }
 
 impl<Root> Default for Bindings<Root> {
@@ -670,14 +664,15 @@ impl<Root> Default for Bindings<Root> {
             spellings: BTreeMap::new(),
             declaration_queries: Cell::new(0),
             reference_queries: Cell::new(0),
+            marker: std::marker::PhantomData,
         }
     }
 }
 
 impl<Root: Clone + Ord> Bindings<Root> {
-    fn spelling(&mut self, encoded_id: &EncodedId<Root>, spelling: &str) {
+    fn spelling(&mut self, encoded_name: &EncodedName, spelling: &str) {
         self.spellings
-            .insert(encoded_id.clone(), Name::new(spelling));
+            .insert(encoded_name.clone(), TextualName::new(spelling));
     }
 
     fn declaration(
@@ -685,29 +680,23 @@ impl<Root: Clone + Ord> Bindings<Root> {
         start: usize,
         end: usize,
         spelling: &str,
-        encoded_id: &EncodedId<Root>,
+        encoded_name: &EncodedName,
     ) {
-        self.spelling(encoded_id, spelling);
+        self.spelling(encoded_name, spelling);
         self.declarations
-            .insert((start, end), (spelling.to_owned(), encoded_id.clone()));
+            .insert((start, end), (spelling.to_owned(), encoded_name.clone()));
     }
 
-    fn reference(
-        &mut self,
-        start: usize,
-        end: usize,
-        spelling: &str,
-        encoded_id: &EncodedId<Root>,
-    ) {
-        self.spelling(encoded_id, spelling);
+    fn reference(&mut self, start: usize, end: usize, spelling: &str, encoded_name: &EncodedName) {
+        self.spelling(encoded_name, spelling);
         self.references
-            .insert((start, end), (spelling.to_owned(), encoded_id.clone()));
+            .insert((start, end), (spelling.to_owned(), encoded_name.clone()));
     }
 }
 
 impl<Root: Ord> EncodedNameResolver<Root> for Bindings<Root> {
-    fn resolve(&self, encoded_id: &EncodedId<Root>) -> Option<&Name> {
-        self.spellings.get(encoded_id)
+    fn resolve(&self, encoded_name: &EncodedName) -> Option<&TextualName> {
+        self.spellings.get(encoded_name)
     }
 }
 
@@ -722,7 +711,7 @@ impl<Root: Clone + Ord> DecodeNameBindings<Root> for Bindings<Root> {
         self.declarations
             .get(&key)
             .filter(|(spelling, _)| spelling == occurrence.spelling())
-            .map(|(_, encoded_id)| DeclarationAssignment::new(encoded_id.clone()))
+            .map(|(_, encoded_name)| DeclarationAssignment::new(encoded_name.clone()))
     }
 
     fn reference_resolution(
@@ -734,20 +723,20 @@ impl<Root: Clone + Ord> DecodeNameBindings<Root> for Bindings<Root> {
         self.references
             .get(&key)
             .filter(|(spelling, _)| spelling == occurrence.spelling())
-            .map(|(_, encoded_id)| ResolvedReference::new(encoded_id.clone()))
+            .map(|(_, encoded_name)| ResolvedReference::new(encoded_name.clone()))
     }
 }
 
-fn encoded<Root>(root: Root, chain: &[u16]) -> EncodedId<Root> {
-    EncodedId::new(
-        root,
-        chain.iter().copied().map(LocalEncodedId::new).collect(),
-    )
-    .expect("fixture chains are non-empty")
+fn encoded(bytes: [u8; 16]) -> EncodedName {
+    EncodedName::from_archive_bytes(bytes)
 }
 
-fn type_id<Root>(root: Root, chain: &[u16]) -> EncodedTypeId<Root> {
-    EncodedTypeId::new(encoded(root, chain))
+fn type_id(bytes: [u8; 16]) -> EncodedTypeId<FirstFixtureLanguage> {
+    EncodedTypeId::new(encoded(bytes))
+}
+
+fn type_id_for<Language>(bytes: [u8; 16]) -> EncodedTypeId<Language> {
+    EncodedTypeId::new(encoded(bytes))
 }
 
 fn profile() -> SealedTokenProfile {
@@ -889,16 +878,16 @@ where
 }
 
 struct ProductFixture {
-    table: AddressedStructuralTable<FirstFixtureRoot, ProductFixtureRule<FirstFixtureRoot>>,
-    document: EncodedTypeId<FirstFixtureRoot>,
+    table: AddressedStructuralTable<FirstFixtureLanguage, ProductFixtureRule<FirstFixtureLanguage>>,
+    document: EncodedTypeId<FirstFixtureLanguage>,
 }
 
 fn product_fixture() -> ProductFixture {
-    let document = type_id(FirstFixtureRoot::Universal, &[30]);
-    let empty_braces = type_id(FirstFixtureRoot::Universal, &[31]);
-    let empty_square = type_id(FirstFixtureRoot::Universal, &[32]);
-    let types_block = type_id(FirstFixtureRoot::Universal, &[33]);
-    let newtype = type_id(FirstFixtureRoot::Universal, &[34]);
+    let document = type_id([1, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let empty_braces = type_id([1, 31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let empty_square = type_id([1, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let types_block = type_id([1, 33, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let newtype = type_id([1, 34, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
     let document_rule = ProductFixtureRule::Left(SixSlotDocumentRecord::new(
         &empty_braces,
@@ -948,10 +937,10 @@ fn product_fixture() -> ProductFixture {
     ProductFixture { table, document }
 }
 
-fn exercise_root<Root>(authored_root: Root, fixed_root: Root)
+fn exercise_language<Language>()
 where
-    Root: rkyv::Archive + Clone + std::fmt::Debug + Eq + Ord,
-    Root: for<'serialize> rkyv::Serialize<
+    Language: rkyv::Archive + Clone + std::fmt::Debug + Eq + Ord,
+    Language: for<'serialize> rkyv::Serialize<
             rkyv::rancor::Strategy<
                 rkyv::ser::Serializer<
                     rkyv::util::AlignedVec,
@@ -962,9 +951,10 @@ where
             >,
         >,
 {
-    let declaration_type = type_id(authored_root.clone(), &[1, 2, 3]);
-    let literal_type = type_id(fixed_root.clone(), &[9, 5]);
-    let literal_word = encoded(fixed_root, &[11, 7, 4]);
+    let declaration_type =
+        type_id_for::<Language>([1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let literal_type = type_id_for::<Language>([9, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let literal_word = encoded([11, 7, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
     let declaration_rule = StructuralRule::Application(
         ApplicationRule::new(
@@ -985,9 +975,9 @@ where
     .expect("table seals");
     let evaluator = StructuralEvaluator::new(&table).expect("shared evaluator");
 
-    let assigned = encoded(authored_root.clone(), &[41, 8, 16]);
-    let resolved = encoded(authored_root, &[3, 21]);
-    let mut bindings = Bindings::default();
+    let assigned = encoded([41, 8, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let resolved = encoded([3, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let mut bindings = Bindings::<Language>::default();
     bindings.declaration(0, 4, "Id16", &assigned);
     bindings.reference(5, 12, "Integer", &resolved);
     bindings.spelling(&literal_word, "struct");
@@ -999,24 +989,20 @@ where
         .field::<ApplicationHead>()
         .expect("typed declaration position")
     {
-        FieldValue::Declaration(found) => assert_eq!(found.encoded_id(), &assigned),
+        FieldValue::Declaration(found) => assert_eq!(found.encoded_name(), &assigned),
         other => panic!("unexpected declaration value: {other:?}"),
     }
     match value
         .field::<ApplicationPayload>()
         .expect("typed reference position")
     {
-        FieldValue::Reference(found) => assert_eq!(found.encoded_id(), &resolved),
+        FieldValue::Reference(found) => assert_eq!(found.encoded_name(), &resolved),
         other => panic!("unexpected reference value: {other:?}"),
     }
     assert_eq!(
-        assigned
-            .chain()
-            .iter()
-            .map(|part| part.value())
-            .collect::<Vec<_>>(),
-        vec![41, 8, 16],
-        "the full module-allocated chain survives evaluation"
+        assigned.archive_bytes(),
+        [41, 8, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "the exact opaque name survives evaluation"
     );
     assert_eq!(
         evaluator
@@ -1035,14 +1021,14 @@ where
 }
 
 #[test]
-fn two_unrelated_root_sets_retain_full_chains_through_one_evaluator() {
-    exercise_root(FirstFixtureRoot::Universal, FirstFixtureRoot::Rust);
-    exercise_root(SecondFixtureRoot::Authored, SecondFixtureRoot::Fixed);
+fn two_unrelated_language_markers_retain_opaque_names_through_one_evaluator() {
+    exercise_language::<FirstFixtureLanguage>();
+    exercise_language::<SecondFixtureLanguage>();
 }
 
 #[test]
 fn unresolved_references_refuse_without_any_allocation_surface() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[1, 9]);
+    let expected = type_id([1, 1, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let rule = StructuralRule::Application(
         ApplicationRule::new(
             APPLICATION,
@@ -1053,7 +1039,7 @@ fn unresolved_references_refuse_without_any_allocation_surface() {
     );
     let table = table(vec![entry(expected.clone(), rule)]).expect("table");
     let evaluator = StructuralEvaluator::new(&table).expect("evaluator");
-    let assigned = encoded(FirstFixtureRoot::Universal, &[8, 13]);
+    let assigned = encoded([1, 8, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.declaration(0, 4, "Name", &assigned);
     let declarations_before = bindings.declarations.clone();
@@ -1072,7 +1058,7 @@ fn unresolved_references_refuse_without_any_allocation_surface() {
 
 #[test]
 fn token_runs_are_longest_match_and_never_split_to_make_a_parse_work() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[2, 2]);
+    let expected = type_id([1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let rule = StructuralRule::Unary(
         UnaryRule::new(SharedDescriptor::Declaration(AtomDescriptor::with_case(
             AtomCase::PascalCase,
@@ -1081,7 +1067,7 @@ fn token_runs_are_longest_match_and_never_split_to_make_a_parse_work() {
     );
     let table = table(vec![entry(expected.clone(), rule)]).expect("table");
     let evaluator = StructuralEvaluator::new(&table).expect("evaluator");
-    let id = encoded(FirstFixtureRoot::Universal, &[99, 16]);
+    let id = encoded([1, 99, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.declaration(0, 4, "Id16", &id);
 
@@ -1090,7 +1076,7 @@ fn token_runs_are_longest_match_and_never_split_to_make_a_parse_work() {
         .expect("whole token accepted");
     assert!(matches!(
         value.field::<structural_codec::UnaryRoot>(),
-        Some(FieldValue::Declaration(found)) if found.encoded_id() == &id
+        Some(FieldValue::Declaration(found)) if found.encoded_name() == &id
     ));
 
     let mut split_only = Bindings::default();
@@ -1104,7 +1090,7 @@ fn token_runs_are_longest_match_and_never_split_to_make_a_parse_work() {
 
 #[test]
 fn downstream_typed_record_uses_the_same_shared_evaluator() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[6, 4, 2]);
+    let expected = type_id([1, 6, 4, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let record = DownstreamDeclarationRecord::new();
     let application_entry = StructuralEntry::new(
         expected.clone(),
@@ -1131,7 +1117,7 @@ fn downstream_typed_record_uses_the_same_shared_evaluator() {
     )
     .expect("custom record table");
 
-    let assigned = encoded(FirstFixtureRoot::Universal, &[55, 34, 21]);
+    let assigned = encoded([1, 55, 34, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.declaration(0, 8, "Sequence", &assigned);
     let value = StructuralEvaluator::new(&table)
@@ -1140,13 +1126,13 @@ fn downstream_typed_record_uses_the_same_shared_evaluator() {
         .expect("custom typed declaration");
     assert!(matches!(
         value.field::<DownstreamDeclarationRole>(),
-        Some(FieldValue::Declaration(found)) if found.encoded_id() == &assigned
+        Some(FieldValue::Declaration(found)) if found.encoded_name() == &assigned
     ));
 }
 
 #[test]
 fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[7, 1]);
+    let expected = type_id([1, 7, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let rule = StructuralRule::AdjacentApplicationDelimited(
         AdjacentApplicationDelimitedRule::new(
             ANGLE,
@@ -1171,9 +1157,9 @@ fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
         &profile,
     )
     .expect("adjacent angle table");
-    let result = encoded(FirstFixtureRoot::Universal, &[7, 2]);
-    let vector = encoded(FirstFixtureRoot::Universal, &[7, 3]);
-    let error = encoded(FirstFixtureRoot::Universal, &[7, 4]);
+    let result = encoded([1, 7, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let vector = encoded([1, 7, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let error = encoded([1, 7, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.reference(0, 6, "Result", &result);
     bindings.reference(7, 13, "Vector", &vector);
@@ -1185,7 +1171,7 @@ fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
         .expect("strict bare angle application");
     assert!(matches!(
         decoded.field::<AdjacentApplicationDelimitedHead>(),
-        Some(FieldValue::Reference(found)) if found.encoded_id() == &result
+        Some(FieldValue::Reference(found)) if found.encoded_name() == &result
     ));
     assert!(matches!(
         decoded.field::<AdjacentApplicationDelimitedItems>(),
@@ -1193,7 +1179,7 @@ fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
             if matches!(items.as_slice(), [
                 FieldValue::Reference(first),
                 FieldValue::Reference(second),
-            ] if first.encoded_id() == &vector && second.encoded_id() == &error)
+            ] if first.encoded_name() == &vector && second.encoded_name() == &error)
     ));
     assert!(
         evaluator
@@ -1231,7 +1217,7 @@ fn adjacent_angle_application_is_strict_and_reemits_without_dot_or_spacing() {
 
 #[test]
 fn dotted_applications_are_disjoint_from_adjacent_angle_applications() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[7, 10]);
+    let expected = type_id([1, 7, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let identity = StructuralRule::Unary(
         UnaryRule::new(SharedDescriptor::Reference(AtomDescriptor::with_case(
             AtomCase::PascalCase,
@@ -1301,10 +1287,10 @@ fn dotted_applications_are_disjoint_from_adjacent_angle_applications() {
         &profile(),
     )
     .expect("adjacent and dotted outer forms are provably disjoint");
-    let result = encoded(FirstFixtureRoot::Universal, &[7, 11]);
-    let ordered = encoded(FirstFixtureRoot::Universal, &[7, 12]);
-    let sortable = encoded(FirstFixtureRoot::Universal, &[7, 13]);
-    let left = encoded(FirstFixtureRoot::Universal, &[7, 14]);
+    let result = encoded([1, 7, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let ordered = encoded([1, 7, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let sortable = encoded([1, 7, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let left = encoded([1, 7, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.reference(0, 6, "Result", &result);
     bindings.reference(7, 14, "Ordered", &ordered);
@@ -1333,7 +1319,7 @@ fn dotted_applications_are_disjoint_from_adjacent_angle_applications() {
 
 #[test]
 fn adjacent_angle_application_preserves_nested_strict_shape() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[7, 5]);
+    let expected = type_id([1, 7, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let identity = StructuralRule::Unary(
         UnaryRule::new(SharedDescriptor::Reference(AtomDescriptor::with_case(
             AtomCase::PascalCase,
@@ -1385,10 +1371,10 @@ fn adjacent_angle_application_preserves_nested_strict_shape() {
         &profile(),
     )
     .expect("nested adjacent angle table");
-    let result = encoded(FirstFixtureRoot::Universal, &[7, 6]);
-    let vector = encoded(FirstFixtureRoot::Universal, &[7, 7]);
-    let ordered = encoded(FirstFixtureRoot::Universal, &[7, 8]);
-    let error = encoded(FirstFixtureRoot::Universal, &[7, 9]);
+    let result = encoded([1, 7, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let vector = encoded([1, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let ordered = encoded([1, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let error = encoded([1, 7, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.reference(0, 6, "Result", &result);
     bindings.reference(7, 13, "Vector", &vector);
@@ -1489,8 +1475,8 @@ fn adjacent_angle_application_preserves_nested_strict_shape() {
 
 #[test]
 fn ordered_sequence_decodes_and_encodes_mixed_lexical_positions() {
-    let expected = type_id(FirstFixtureRoot::Rust, &[8, 1]);
-    let keyword = encoded(FirstFixtureRoot::Rust, &[3]);
+    let expected = type_id([2, 8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let keyword = encoded([2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let record = LexicalSequenceRecord::new(keyword.clone());
     let constructor = EncodedConstructorId::under(&expected, 1);
     let entry = StructuralEntry::new(
@@ -1517,7 +1503,7 @@ fn ordered_sequence_decodes_and_encodes_mixed_lexical_positions() {
         &profile,
     )
     .expect("sequence table");
-    let declaration = encoded(FirstFixtureRoot::Universal, &[7, 16]);
+    let declaration = encoded([1, 7, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.spelling(&keyword, "pub");
     bindings.declaration(4, 10, "Widget", &declaration);
@@ -1532,7 +1518,7 @@ fn ordered_sequence_decodes_and_encodes_mixed_lexical_positions() {
     ));
     assert!(matches!(
         decoded.field::<SequenceDeclarationRole>(),
-        Some(FieldValue::Declaration(found)) if found.encoded_id() == &declaration
+        Some(FieldValue::Declaration(found)) if found.encoded_name() == &declaration
     ));
 
     let mut reflected = StructuralValue::record(constructor);
@@ -1562,8 +1548,8 @@ fn ordered_sequence_decodes_and_encodes_mixed_lexical_positions() {
 
 #[test]
 fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declaration() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[8, 2]);
-    let keyword = encoded(FirstFixtureRoot::Universal, &[8, 3]);
+    let expected = type_id([1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let keyword = encoded([1, 8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let record = DerivedFutureRecord::new(keyword.clone());
     let derived_role = record.future_or_value.role();
     let entry = StructuralEntry::new(
@@ -1590,18 +1576,18 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
         &profile,
     )
     .expect("derived descriptor table");
-    let target = encoded(FirstFixtureRoot::Universal, &[8, 4]);
-    let declaration = encoded(FirstFixtureRoot::Universal, &[8, 5]);
+    let target = encoded([1, 8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let declaration = encoded([1, 8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.spelling(&keyword, "Realize");
     bindings.reference(8, 14, "target", &target);
     bindings.declaration(0, 6, "Widget", &declaration);
 
     let evaluator = StructuralEvaluator::new(&table).expect("shared evaluator");
-    let no_fixed_vocabulary = Bindings::<FirstFixtureRoot>::default();
+    let no_fixed_vocabulary = Bindings::<FirstFixtureLanguage>::default();
     assert!(matches!(
         evaluator.plan_text(&expected, "Realize.target", &no_fixed_vocabulary),
-        Err(DecodeError::UnknownEncodedName { encoded_id }) if encoded_id == keyword
+        Err(DecodeError::UnknownEncodedName { encoded_name }) if encoded_name == keyword
     ));
     assert_eq!(no_fixed_vocabulary.declaration_queries.get(), 0);
     assert_eq!(no_fixed_vocabulary.reference_queries.get(), 0);
@@ -1631,7 +1617,7 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
         future.field::<DerivedFutureRole>(),
         Some(FieldValue::Application { head, payload })
             if matches!(head.as_ref(), FieldValue::Literal(found) if found == &keyword)
-                && matches!(payload.as_ref(), FieldValue::Reference(found) if found.encoded_id() == &target)
+                && matches!(payload.as_ref(), FieldValue::Reference(found) if found.encoded_name() == &target)
     ));
     assert_eq!(
         future.field_by_role(derived_role),
@@ -1652,7 +1638,7 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
         .expect("literal declaration branch");
     assert!(matches!(
         literal.field::<DerivedFutureRole>(),
-        Some(FieldValue::Declaration(found)) if found.encoded_id() == &declaration
+        Some(FieldValue::Declaration(found)) if found.encoded_name() == &declaration
     ));
     assert_eq!(bindings.declaration_queries.get(), 1);
     assert_eq!(bindings.reference_queries.get(), 1);
@@ -1687,10 +1673,10 @@ fn descriptor_alternation_decodes_dotted_future_lookup_only_or_literal_declarati
 
 #[test]
 fn rejected_alternation_candidate_cannot_leak_its_unique_planned_declaration() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[8, 20]);
-    let rejected_payload = encoded(FirstFixtureRoot::Universal, &[8, 21]);
-    let selected_head = encoded(FirstFixtureRoot::Universal, &[8, 22]);
-    let selected_payload = encoded(FirstFixtureRoot::Universal, &[8, 23]);
+    let expected = type_id([1, 8, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let rejected_payload = encoded([1, 8, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let selected_head = encoded([1, 8, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let selected_payload = encoded([1, 8, 23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let record = RejectedCandidateRecord::new(
         rejected_payload.clone(),
         selected_head.clone(),
@@ -1751,8 +1737,8 @@ fn rejected_alternation_candidate_cannot_leak_its_unique_planned_declaration() {
 
 #[test]
 fn reserved_application_is_disjoint_from_an_excluding_reference_application() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[8, 9]);
-    let keyword = encoded(FirstFixtureRoot::Universal, &[8, 10]);
+    let expected = type_id([1, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let keyword = encoded([1, 8, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let future = StructuralRule::Application(
         ApplicationRule::new(
             APPLICATION,
@@ -1806,9 +1792,9 @@ fn reserved_application_is_disjoint_from_an_excluding_reference_application() {
         &profile,
     )
     .expect("identity exclusion proves the applications disjoint");
-    let target = encoded(FirstFixtureRoot::Universal, &[8, 11]);
-    let module = encoded(FirstFixtureRoot::Universal, &[8, 12]);
-    let member = encoded(FirstFixtureRoot::Universal, &[8, 13]);
+    let target = encoded([1, 8, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let module = encoded([1, 8, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let member = encoded([1, 8, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.spelling(&keyword, "Realize");
     bindings.reference(8, 14, "target", &target);
@@ -1834,7 +1820,7 @@ fn reserved_application_is_disjoint_from_an_excluding_reference_application() {
     let mut excluded = Bindings::default();
     excluded.spelling(&keyword, "Realize");
     excluded.reference(0, 7, "Realize", &keyword);
-    let reference_only = type_id(FirstFixtureRoot::Universal, &[8, 14]);
+    let reference_only = type_id([1, 8, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let reference_entry = entry(
         reference_only.clone(),
         StructuralRule::Unary(
@@ -1861,8 +1847,8 @@ fn reserved_application_is_disjoint_from_an_excluding_reference_application() {
 
 #[test]
 fn delimited_content_can_be_a_fixed_ordered_sequence() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[8, 6]);
-    let keyword = encoded(FirstFixtureRoot::Universal, &[8, 7]);
+    let expected = type_id([1, 8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let keyword = encoded([1, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let record = GenericDelimitedContentRecord::new(keyword.clone());
     let constructor = EncodedConstructorId::under(&expected, 1);
     let entry = StructuralEntry::new(
@@ -1889,7 +1875,7 @@ fn delimited_content_can_be_a_fixed_ordered_sequence() {
         &profile,
     )
     .expect("generic delimited table");
-    let declaration = encoded(FirstFixtureRoot::Universal, &[8, 8]);
+    let declaration = encoded([1, 8, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.spelling(&keyword, "Public");
     bindings.declaration(8, 14, "Widget", &declaration);
@@ -1904,7 +1890,7 @@ fn delimited_content_can_be_a_fixed_ordered_sequence() {
     ));
     assert!(matches!(
         decoded.field::<DelimitedSequenceDeclarationRole>(),
-        Some(FieldValue::Declaration(found)) if found.encoded_id() == &declaration
+        Some(FieldValue::Declaration(found)) if found.encoded_name() == &declaration
     ));
     assert_eq!(
         StructuralEvaluator::new(&table)
@@ -1920,8 +1906,8 @@ fn ordered_product_decodes_six_typed_root_blocks_with_absolute_bounds() {
     let fixture = product_fixture();
     let evaluator = StructuralEvaluator::new(&fixture.table).expect("product evaluator");
     let source = "  {}\n []  []\n {Widget.Integer}\n {}\t{}  ";
-    let assigned = encoded(FirstFixtureRoot::Universal, &[30, 7]);
-    let resolved = encoded(FirstFixtureRoot::Universal, &[3]);
+    let assigned = encoded([1, 30, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let resolved = encoded([1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
 
     let plan = evaluator
@@ -2020,7 +2006,7 @@ fn ordered_product_decodes_six_typed_root_blocks_with_absolute_bounds() {
 fn ordered_product_refuses_too_few_and_too_many_root_blocks_with_typed_arity() {
     let fixture = product_fixture();
     let evaluator = StructuralEvaluator::new(&fixture.table).expect("product evaluator");
-    let bindings = Bindings::<FirstFixtureRoot>::default();
+    let bindings = Bindings::<FirstFixtureLanguage>::default();
 
     assert!(matches!(
         evaluator.decode_text(&fixture.document, "{} [] [] {} {}", &bindings),
@@ -2042,7 +2028,7 @@ fn ordered_product_refuses_too_few_and_too_many_root_blocks_with_typed_arity() {
 fn ordered_product_refuses_a_block_that_does_not_match_its_typed_position() {
     let fixture = product_fixture();
     let evaluator = StructuralEvaluator::new(&fixture.table).expect("product evaluator");
-    let bindings = Bindings::<FirstFixtureRoot>::default();
+    let bindings = Bindings::<FirstFixtureLanguage>::default();
 
     assert!(matches!(
         evaluator.decode_text(&fixture.document, "[] [] [] {} {} {}", &bindings),
@@ -2058,8 +2044,8 @@ fn ordered_product_refuses_a_block_that_does_not_match_its_typed_position() {
 
 #[test]
 fn repeated_application_boundary_is_proven_before_name_lookup() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[10, 20]);
-    let private = encoded(FirstFixtureRoot::Universal, &[10, 21]);
+    let expected = type_id([1, 10, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let private = encoded([1, 10, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let record = ApplicationBoundaryRecord::new(private.clone());
     let constructor = EncodedConstructorId::under(&expected, 1);
     let application_entry = StructuralEntry::new(
@@ -2130,9 +2116,9 @@ fn repeated_application_boundary_is_proven_before_name_lookup() {
 
 #[test]
 fn ordered_sequence_chooses_the_greatest_repetition_count_with_a_typed_tail() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[10, 30]);
-    let keyword = encoded(FirstFixtureRoot::Universal, &[10, 31]);
-    let private = encoded(FirstFixtureRoot::Universal, &[10, 32]);
+    let expected = type_id([1, 10, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let keyword = encoded([1, 10, 31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let private = encoded([1, 10, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let record = AmbiguousSequenceRecord::new(keyword.clone(), private.clone());
     let constructor = EncodedConstructorId::under(&expected, 1);
     let sequence_entry = StructuralEntry::new(
@@ -2162,8 +2148,8 @@ fn ordered_sequence_chooses_the_greatest_repetition_count_with_a_typed_tail() {
     let evaluator = StructuralEvaluator::new(&sequence_table).expect("shared evaluator");
 
     let source = "Realize.first Realize.second Private";
-    let first = encoded(FirstFixtureRoot::Universal, &[10, 33]);
-    let second = encoded(FirstFixtureRoot::Universal, &[10, 34]);
+    let first = encoded([1, 10, 33, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let second = encoded([1, 10, 34, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut bindings = Bindings::default();
     bindings.spelling(&keyword, "Realize");
     bindings.spelling(&private, "Private");
@@ -2210,7 +2196,7 @@ fn ordered_sequence_chooses_the_greatest_repetition_count_with_a_typed_tail() {
     assert!(matches!(
         decoded.field::<AmbiguousSequenceRequiredRole>(),
         Some(FieldValue::Application { payload, .. })
-            if matches!(payload.as_ref(), FieldValue::Reference(found) if found.encoded_id() == &second)
+            if matches!(payload.as_ref(), FieldValue::Reference(found) if found.encoded_name() == &second)
     ));
     assert!(matches!(
         decoded.field::<AmbiguousSequenceLiteralRole>(),
@@ -2218,7 +2204,7 @@ fn ordered_sequence_chooses_the_greatest_repetition_count_with_a_typed_tail() {
     ));
 
     let refusal_source = "Realize.only Mystery";
-    let only = encoded(FirstFixtureRoot::Universal, &[10, 35]);
+    let only = encoded([1, 10, 35, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let mut refusal_bindings = Bindings::default();
     refusal_bindings.spelling(&keyword, "Realize");
     refusal_bindings.spelling(&private, "Private");
@@ -2233,8 +2219,8 @@ fn ordered_sequence_chooses_the_greatest_repetition_count_with_a_typed_tail() {
 
 #[test]
 fn table_identity_is_independent_of_entry_submission_order() {
-    let left = type_id(FirstFixtureRoot::Universal, &[10, 1]);
-    let right = type_id(FirstFixtureRoot::Rust, &[4, 9]);
+    let left = type_id([1, 10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let right = type_id([2, 4, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let left_entry = entry(
         left,
         StructuralRule::Unary(
@@ -2258,7 +2244,7 @@ fn table_identity_is_independent_of_entry_submission_order() {
 
 #[test]
 fn typed_position_overlap_is_refused_instead_of_order_resolved() {
-    let expected = type_id(FirstFixtureRoot::Universal, &[7, 7]);
+    let expected = type_id([1, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let declaration = StructuralRule::Unary(
         UnaryRule::new(SharedDescriptor::Declaration(AtomDescriptor::any_case()))
             .expect("declaration role"),
@@ -2299,15 +2285,17 @@ fn typed_position_overlap_is_refused_instead_of_order_resolved() {
 
 #[test]
 fn delegated_alternation_recovers_only_when_the_value_belongs_to_another_target() {
-    type Rule =
-        RuleCoproduct<MultiDelegateRecord<FirstFixtureRoot>, StructuralRule<FirstFixtureRoot>>;
+    type Rule = RuleCoproduct<
+        MultiDelegateRecord<FirstFixtureLanguage>,
+        StructuralRule<FirstFixtureLanguage>,
+    >;
 
-    let parent = type_id(FirstFixtureRoot::Universal, &[60]);
-    let reverse_parent = type_id(FirstFixtureRoot::Universal, &[63]);
-    let left = type_id(FirstFixtureRoot::Universal, &[61]);
-    let right = type_id(FirstFixtureRoot::Universal, &[62]);
-    let left_word = encoded(FirstFixtureRoot::Universal, &[70]);
-    let right_word = encoded(FirstFixtureRoot::Universal, &[71]);
+    let parent = type_id([1, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let reverse_parent = type_id([1, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let left = type_id([1, 61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let right = type_id([1, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let left_word = encoded([1, 70, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let right_word = encoded([1, 71, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let parent_rule = Rule::Left(MultiDelegateRecord::new(left.clone(), right.clone()));
     let reverse_parent_rule = Rule::Left(MultiDelegateRecord::new(right.clone(), left.clone()));
     let left_rule = Rule::Right(StructuralRule::Unary(

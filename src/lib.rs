@@ -1,7 +1,7 @@
 //! Shared evaluation of archived, fully typed structural records.
 //!
-//! Tables persist actual typed records and complete root-fronted encoded-ID
-//! chains. The evaluator returns a role-keyed mirror for manual language
+//! Tables persist actual typed records and opaque authority-issued encoded
+//! names. The evaluator returns a role-keyed mirror for manual language
 //! reification and reflection.
 //!
 //! Field roles cannot be transposed: the two position types differ at compile time.
@@ -71,7 +71,7 @@ pub use form::{
     StructuralRuleView, StructureRecord, UnaryRoot, UnaryRule,
 };
 pub use ids::{DecodeFormId, EncodedConstructorId, EncodedTypeId, FieldRole, StableRoleId};
-pub use legacy_name_table::{EncodedId, LocalEncodedId, TableAddress};
+pub use name_table::{EncodedName, TextualName};
 pub use names::{
     DeclarationAssignment, DecodeNameBindings, EncodedNameResolver, NameOccurrence,
     ResolvedReference,

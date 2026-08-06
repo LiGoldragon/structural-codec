@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use name_table::EncodedName;
+
 use crate::codec::StructuralEntry;
 use crate::error::{DisjointnessError, DisjointnessReason};
 use crate::form::{
@@ -32,11 +34,8 @@ fn fields<Root: Clone, Record: StructureRecord<Root>>(
 }
 
 enum Outer<'a, Root> {
-    Named(
-        Option<crate::atom::AtomCase>,
-        &'a [legacy_name_table::EncodedId<Root>],
-    ),
-    Literal(&'a legacy_name_table::EncodedId<Root>),
+    Named(Option<crate::atom::AtomCase>, &'a [EncodedName]),
+    Literal(&'a EncodedName),
     Application(&'a SharedDescriptor<Root>, &'a SharedDescriptor<Root>),
     Boundary(raw_discovery::TriggerIdentifier),
     Carrier(raw_discovery::TriggerIdentifier),

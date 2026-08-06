@@ -1,6 +1,7 @@
 //! Typed failures at the structural-codec boundary.
 
 use content_identity::ArchiveError;
+use name_table::EncodedName;
 use raw_discovery::{
     BlockDiscoveryError, BoundaryDiscoveryContextIdentifier, SourceBound, TokenProfileError,
     TriggerIdentifier,
@@ -78,14 +79,12 @@ pub enum DecodeError<Root> {
     MissingDeclarationAssignment { bound: SourceBound },
     #[error("a lookup-only reference did not resolve at {bound:?}")]
     UnresolvedReference { bound: SourceBound },
-    #[error("the supplied encoded ID resolves to a different spelling at {bound:?}")]
+    #[error("the supplied encoded name resolves to a different spelling at {bound:?}")]
     NameBindingMismatch { bound: SourceBound },
-    #[error("the resolved encoded identity is reserved at {bound:?}")]
+    #[error("the resolved encoded nameentity is reserved at {bound:?}")]
     ExcludedNameIdentity { bound: SourceBound },
     #[error("the encoded name has no spelling in the supplied resolver")]
-    UnknownEncodedName {
-        encoded_id: legacy_name_table::EncodedId<Root>,
-    },
+    UnknownEncodedName { encoded_name: EncodedName },
     #[error("ordered product expected {expected} sibling blocks, found {found}")]
     ProductArityMismatch { expected: usize, found: usize },
     #[error(
@@ -163,12 +162,10 @@ pub enum EncodeError<Root> {
     ShapeMismatch,
     #[error("the encoded atom did not match the canonical literal")]
     LiteralMismatch,
-    #[error("the encoded identity is reserved at this name position")]
+    #[error("the encoded nameentity is reserved at this name position")]
     ExcludedNameIdentity,
     #[error("the encoded name has no spelling in the supplied resolver")]
-    UnknownEncodedName {
-        encoded_id: legacy_name_table::EncodedId<Root>,
-    },
+    UnknownEncodedName { encoded_name: EncodedName },
     #[error("delegated position did not satisfy {payload:?}")]
     DelegationPayloadMismatch { payload: Option<DelegationPayload> },
     #[error("repeated position held {found} objects outside its declared bounds")]

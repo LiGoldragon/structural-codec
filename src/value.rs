@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use name_table::EncodedName;
+
 use raw_discovery::SourceBound;
 
 use crate::error::AuthoringError;
@@ -17,7 +19,7 @@ use crate::names::{DeclarationAssignment, ResolvedReference};
 pub enum FieldValue<Root> {
     Declaration(DeclarationAssignment<Root>),
     Reference(ResolvedReference<Root>),
-    Literal(legacy_name_table::EncodedId<Root>),
+    Literal(EncodedName),
     Scalar(ScalarValue),
     /// Marker for a fixed ordered product whose member values are stored under
     /// their own typed roles in the enclosing mirror.

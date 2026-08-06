@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use legacy_name_table::Name;
+use name_table::{EncodedName, TextualName};
 use raw_discovery::SourceBound;
 
 use crate::ids::{EncodedConstructorId, FieldRole, StableRoleId};
@@ -15,20 +15,20 @@ use crate::value::ScalarValue;
 /// One declaration or reference occurrence selected by structural planning.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedName {
-    spelling: Name,
+    spelling: TextualName,
     bound: SourceBound,
 }
 
 impl PlannedName {
-    pub(crate) fn new(spelling: impl Into<Name>, bound: SourceBound) -> Self {
+    pub(crate) fn new(spelling: impl Into<String>, bound: SourceBound) -> Self {
         Self {
-            spelling: spelling.into(),
+            spelling: TextualName::new(spelling),
             bound,
         }
     }
 
     /// Exact source spelling at this typed position.
-    pub fn spelling(&self) -> &Name {
+    pub fn spelling(&self) -> &TextualName {
         &self.spelling
     }
 
@@ -47,7 +47,7 @@ impl PlannedName {
 pub enum PlannedFieldValue<Root> {
     Declaration(PlannedName),
     Reference(PlannedName),
-    Literal(legacy_name_table::EncodedId<Root>),
+    Literal(EncodedName),
     Scalar(ScalarValue),
     OrderedProduct,
     Delimited(Box<PlannedFieldValue<Root>>),

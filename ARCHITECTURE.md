@@ -34,30 +34,29 @@ reverse. It is the complete-record surface for languages such as Rust whose
 item positions are not all sibling blocks.
 
 All table, proof, decode, and encode machinery is generic over a caller-supplied
-root enum and a `StructureRecord<Root>`. `StructuralRule<Root>` is the kernel
+language marker and a `StructureRecord<Language>`. `StructuralRule<Language>` is the kernel
 convenience vocabulary. Downstream typed records can be combined with
 `RuleCoproduct`; the branches select data only.
 
 Accepted forms are identified by stable constructor and form identities.
 Vector order never selects meaning. Every pair of accepted forms must be
 provably disjoint over typed positions. An overlap is refused at seal.
-Table entries are canonically sorted by complete encoded type identity before
+Table entries are canonically sorted by opaque encoded type identity before
 the table identity is derived.
 
-## Encoded-ID chains and name roles
+## Encoded names and name roles
 
-`EncodedTypeId<Root>` retains one complete non-empty
-`name_table::EncodedId<Root>`. It has no flat local projection and no
-Ethos/Logos/Nomos component dimension. `EncodedConstructorId<Root>` keeps its
-complete owning type identity plus a constructor-local number.
+`EncodedTypeId<Language>` carries one authority-issued `EncodedName` and no
+hierarchical projection. `EncodedConstructorId<Language>` keeps its owning
+type identity plus a distinct constructor-local number.
 
 Named structural positions are explicit:
 
-- `Declaration` consumes a `DeclarationAssignment<Root>` already issued by
-  sema-translator.
-- `Reference` consumes a `ResolvedReference<Root>` from lookup-only caller
+- `Declaration` consumes a `DeclarationAssignment<Language>` already issued
+  by the authority.
+- `Reference` consumes a `ResolvedReference<Language>` from lookup-only caller
   state.
-- `Literal` carries the complete encoded ID of a fixed vocabulary word.
+- `Literal` carries an `EncodedName` for a fixed vocabulary word.
 
 `DecodeNameBindings` has distinct methods for declarations and references and
 receives the exact source bound. Equal spellings in different modules can
@@ -66,7 +65,7 @@ therefore resolve differently without this crate inventing module context.
 literal comparison.
 
 There is no allocation method, mutable name table, identity-continuation
-mechanism, cross-root fallback, or flattened identifier. Missing assignments,
+mechanism, fallback authority, or flattened identifier. Missing assignments,
 unresolved references, and unknown spelling projections fail typed.
 
 ## Shared evaluation
@@ -83,27 +82,25 @@ applications consume their expected operator, and bounded descriptors enter
 already-discovered children. Encoding follows the same descriptors in reverse
 under the table-owned rendering policy.
 
-The result is a constructor-tagged `StructuralValue<Root>` whose role-keyed
+The result is a constructor-tagged `StructuralValue<Language>` whose role-keyed
 fields retain declaration, reference, and literal roles as distinct variants.
 `decode_text_bounded` additionally returns runtime-only, full-source
 `SourceBound`s keyed by those same typed roles.
-`Textual::reify` and `Textual::reflect` remain the only consumer-supplied value
-mappings.
 
 ## Deliberate boundaries
 
-The crate does not define the production root variants or emitted textual
-encoding of an encoded-ID chain. It does not define Capsule/table pin
+The crate does not define production authority allocation or emitted textual
+metadata. It does not define Capsule/table pin
 composition, move, retirement, dynamic-enum identity, or recursive per-thing
 content hashing.
 
 The table identity layout is 11 because the archived identity payload now
-carries generic full-chain identities, typed name-position roles, and distinct
+carries generic opaque identities, typed name-position roles, and distinct
 ordered-product and ordered-sequence descriptors.
 
 The former internal test corpus depended on the retired flat, locally
 allocating `NameTable` API. Its structural/refusal claims are rehomed in the
-public `downstream_authoring` contract, including two unrelated root enums,
-full-chain preservation, declaration/reference separation, lookup refusal,
+public `downstream_authoring` contract, including two unrelated language
+markers, opaque-name preservation, declaration/reference separation, lookup refusal,
 token longest-match, typed overlap refusal, and six sibling typed root blocks
 with exact source bounds and typed arity/position refusal.

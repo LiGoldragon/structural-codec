@@ -3,11 +3,11 @@
 `structural-codec` is the shared evaluator for archived, fully typed structural
 rule records.
 
-The crate is generic over a caller-supplied vocabulary-root enum. Type,
-constructor, descriptor, and mirror values retain complete root-fronted
-encoded-ID chains without flattening. Declarations accept translator-issued
-assignments, references use lookup-only resolution, and fixed vocabulary words
-resolve through a read-only spelling projection. The crate has no identity
+The crate is generic over a caller-supplied language marker. Type,
+constructor, descriptor, and mirror values carry opaque authority-issued
+`EncodedName` values. Declarations accept authority-issued assignments,
+references use lookup-only resolution, and fixed vocabulary words resolve
+through a read-only `TextualName` projection. The crate has no identity
 allocation surface.
 
 Textual decode first discovers source-bounded blocks, then evaluates expected
