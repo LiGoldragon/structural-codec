@@ -5,6 +5,15 @@ disjointness prover, and one shared evaluator. It does not own a language
 parser, identity allocator, name-table writer, or second language-specific
 interpreter.
 
+## Strict encoded bodies
+
+`EncodedForm` is the narrow truth-side contract reinstated by the 2026-08-07
+`TrueNamed` ruling. An implementation is the strict, name-free encoded value
+itself: `EncodedForm: TrueNamed`, so its identity is the existing portable
+rkyv wire bytes. It carries no conversion, textual-projection, or wrapper
+layer. Its own `TextualName` is external metadata; references in the strict
+body are `EncodedName` values.
+
 ## Typed rules
 
 Fixed positions are actual archived record fields.

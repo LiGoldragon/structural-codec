@@ -125,7 +125,7 @@ impl<Root: Clone> DraftStructuralValue<Root> {
 
 #[derive(Clone)]
 enum DraftName<Root> {
-    Bound(name_table::EncodedId<Root>),
+    Bound(legacy_name_table::EncodedId<Root>),
     Planned(PlannedName),
 }
 
@@ -133,7 +133,7 @@ enum DraftName<Root> {
 enum DraftFieldValue<Root> {
     Declaration(DraftName<Root>),
     Reference(DraftName<Root>),
-    Literal(name_table::EncodedId<Root>),
+    Literal(legacy_name_table::EncodedId<Root>),
     Scalar(ScalarValue),
     OrderedProduct,
     Delimited(Rc<DraftFieldValue<Root>>),
@@ -236,7 +236,10 @@ impl<Root, Bindings> EncodedNameResolver<Root> for BoundEvaluationNames<'_, Bind
 where
     Bindings: DecodeNameBindings<Root> + ?Sized,
 {
-    fn resolve(&self, encoded_id: &name_table::EncodedId<Root>) -> Option<&name_table::Name> {
+    fn resolve(
+        &self,
+        encoded_id: &legacy_name_table::EncodedId<Root>,
+    ) -> Option<&legacy_name_table::Name> {
         self.bindings.resolve(encoded_id)
     }
 }
@@ -278,7 +281,10 @@ impl<Root, Resolver> EncodedNameResolver<Root> for PlanningEvaluationNames<'_, R
 where
     Resolver: EncodedNameResolver<Root> + ?Sized,
 {
-    fn resolve(&self, encoded_id: &name_table::EncodedId<Root>) -> Option<&name_table::Name> {
+    fn resolve(
+        &self,
+        encoded_id: &legacy_name_table::EncodedId<Root>,
+    ) -> Option<&legacy_name_table::Name> {
         self.resolver.resolve(encoded_id)
     }
 }
@@ -2104,7 +2110,7 @@ where
 
     fn resolve_text(
         resolver: &(impl EncodedNameResolver<Root> + ?Sized),
-        encoded_id: &name_table::EncodedId<Root>,
+        encoded_id: &legacy_name_table::EncodedId<Root>,
     ) -> Result<String, EncodeError<Root>> {
         resolver
             .resolve(encoded_id)

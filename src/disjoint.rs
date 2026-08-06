@@ -34,9 +34,9 @@ fn fields<Root: Clone, Record: StructureRecord<Root>>(
 enum Outer<'a, Root> {
     Named(
         Option<crate::atom::AtomCase>,
-        &'a [name_table::EncodedId<Root>],
+        &'a [legacy_name_table::EncodedId<Root>],
     ),
-    Literal(&'a name_table::EncodedId<Root>),
+    Literal(&'a legacy_name_table::EncodedId<Root>),
     Application(&'a SharedDescriptor<Root>, &'a SharedDescriptor<Root>),
     Boundary(raw_discovery::TriggerIdentifier),
     Carrier(raw_discovery::TriggerIdentifier),

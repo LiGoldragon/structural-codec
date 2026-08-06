@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
-use name_table::{IdentifierNamespace, NameTable};
+use legacy_name_table::{IdentifierNamespace, NameTable};
 use raw_discovery::{
     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext,
     BoundaryDiscoveryContextIdentifier, BoundaryDiscoveryTransition, CharacterSet, ProfileRevision,

@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use name_table::{EncodedId, LocalEncodedId, Name};
+use legacy_name_table::{EncodedId, LocalEncodedId, Name};
 use raw_discovery::{
     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext,
     BoundaryDiscoveryContextIdentifier, BoundaryDiscoveryTransition, RawProfile,

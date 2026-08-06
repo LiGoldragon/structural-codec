@@ -4,7 +4,7 @@
 //! declaration assignments and already-resolved references; it cannot turn a
 //! spelling into a new encoded ID.
 
-use name_table::{EncodedId, Name};
+use legacy_name_table::{EncodedId, Name};
 use raw_discovery::SourceBound;
 
 /// One name occurrence in the source currently being evaluated.

@@ -3,7 +3,7 @@ use crate::{
     ConformanceHarness, DecodeError, EncodeError, EncodedConstructorId, FieldValue, GeneratedCodec,
     StructuralValue, UnaryRoot,
 };
-use name_table::{Identifier, IdentifierNamespace, Name, NameResolver, NameTable};
+use legacy_name_table::{Identifier, IdentifierNamespace, Name, NameResolver, NameTable};
 use crate::{Atom, AtomCase};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

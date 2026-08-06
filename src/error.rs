@@ -84,7 +84,7 @@ pub enum DecodeError<Root> {
     ExcludedNameIdentity { bound: SourceBound },
     #[error("the encoded name has no spelling in the supplied resolver")]
     UnknownEncodedName {
-        encoded_id: name_table::EncodedId<Root>,
+        encoded_id: legacy_name_table::EncodedId<Root>,
     },
     #[error("ordered product expected {expected} sibling blocks, found {found}")]
     ProductArityMismatch { expected: usize, found: usize },
@@ -167,7 +167,7 @@ pub enum EncodeError<Root> {
     ExcludedNameIdentity,
     #[error("the encoded name has no spelling in the supplied resolver")]
     UnknownEncodedName {
-        encoded_id: name_table::EncodedId<Root>,
+        encoded_id: legacy_name_table::EncodedId<Root>,
     },
     #[error("delegated position did not satisfy {payload:?}")]
     DelegationPayloadMismatch { payload: Option<DelegationPayload> },

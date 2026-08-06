@@ -7,7 +7,7 @@ use crate::{
     EncodedLanguage, SharedDescriptor, StructuralEntry, StructuralEvaluator, StructuralRule,
     StructuralVocabularyIdentity, TableIdentityPayload, TargetLayoutIdentity,
 };
-use name_table::{IdentifierNamespace, NameTable};
+use legacy_name_table::{IdentifierNamespace, NameTable};
 use raw_discovery::{
     BlockTree, BlockTreeDiscoveryConfiguration,
     BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext, BoundaryDiscoveryContextIdentifier,

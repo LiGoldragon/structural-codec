@@ -106,6 +106,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "content-identity"
+version = "0.6.0"
+source = "git+https://github.com/LiGoldragon/content-identity.git?rev=df1d25c7cd9e822ae03255e04ede59a00b78480b#df1d25c7cd9e822ae03255e04ede59a00b78480b"
+dependencies = [
+ "blake3",
+ "rkyv",
+ "thiserror",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -214,6 +224,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "name-table"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/name-table.git?rev=7dd5db15c16b4246c83d049c759415d3252a7d43#7dd5db15c16b4246c83d049c759415d3252a7d43"
+dependencies = [
+ "content-identity 0.6.0 (git+https://github.com/LiGoldragon/content-identity.git?rev=df1d25c7cd9e822ae03255e04ede59a00b78480b)",
+ "rkyv",
+ "thiserror",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -277,7 +297,7 @@ name = "raw-discovery"
 version = "0.5.0"
 source = "git+https://github.com/LiGoldragon/raw-discovery.git?rev=25c2003ca02c5c2a7047ccd5629abfb698a90459#25c2003ca02c5c2a7047ccd5629abfb698a90459"
 dependencies = [
- "content-identity 0.6.0",
+ "content-identity 0.6.0 (git+https://github.com/LiGoldragon/content-identity.git?rev=7f005b3b73ae141d11b9723ab38e69c9d4859410)",
  "rkyv",
  "thiserror",
 ]
@@ -349,8 +369,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 name = "structural-codec"
 version = "0.22.0"
 dependencies = [
- "content-identity 0.6.0",
- "name-table",
+ "content-identity 0.6.0 (git+https://github.com/LiGoldragon/content-identity.git?rev=7f005b3b73ae141d11b9723ab38e69c9d4859410)",
+ "name-table 0.3.0",
+ "name-table 0.4.0",
  "raw-discovery",
  "rkyv",
  "thiserror",

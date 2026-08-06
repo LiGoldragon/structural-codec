@@ -2,7 +2,7 @@
 
 use crate::StructuralEvaluator;
 use crate::fixture::{COMMIT_SEQUENCE, FixtureBuilder};
-use name_table::{IdentifierNamespace, NameTable};
+use legacy_name_table::{IdentifierNamespace, NameTable};
 
 #[test]
 fn law_one_value_round_trip_uses_the_source_tree_route() {

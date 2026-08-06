@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use content_identity::PortableArchive;
-use name_table::{IdentifierNamespace, Name, NameTable, NameTableError};
+use legacy_name_table::{IdentifierNamespace, Name, NameTable, NameTableError};
 use raw_discovery::{
     BlockTreeDiscoveryConfiguration, BoundaryDiscoveryConfiguration, BoundaryDiscoveryContext,
     BoundaryDiscoveryContextIdentifier, CharacterSet, ProfileRevision, TokenProfileData, Trigger,

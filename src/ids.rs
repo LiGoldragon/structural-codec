@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use name_table::EncodedId;
+use legacy_name_table::EncodedId;
 
 /// A production-compatible encoded type identity.
 ///

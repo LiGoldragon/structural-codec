@@ -12,7 +12,7 @@ use crate::{
     StructuralRule, StructuralVocabularyIdentity, StructureRecord, TableIdentityPayload,
     TargetLayoutIdentity, UnaryRule,
 };
-use name_table::{IdentifierNamespace, NameTable};
+use legacy_name_table::{IdentifierNamespace, NameTable};
 
 #[test]
 fn shared_evaluator_decodes_and_encodes_a_typed_record_without_position_counting() {

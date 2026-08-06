@@ -8,7 +8,7 @@
 
 use std::marker::PhantomData;
 
-use name_table::EncodedId;
+use legacy_name_table::EncodedId;
 use raw_discovery::TriggerIdentifier;
 
 use crate::atom::{Atom, AtomCase};

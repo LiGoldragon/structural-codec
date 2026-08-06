@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use name_table::Name;
+use legacy_name_table::Name;
 use raw_discovery::SourceBound;
 
 use crate::ids::{EncodedConstructorId, FieldRole, StableRoleId};
@@ -47,7 +47,7 @@ impl PlannedName {
 pub enum PlannedFieldValue<Root> {
     Declaration(PlannedName),
     Reference(PlannedName),
-    Literal(name_table::EncodedId<Root>),
+    Literal(legacy_name_table::EncodedId<Root>),
     Scalar(ScalarValue),
     OrderedProduct,
     Delimited(Box<PlannedFieldValue<Root>>),

@@ -17,7 +17,7 @@ use crate::names::{DeclarationAssignment, ResolvedReference};
 pub enum FieldValue<Root> {
     Declaration(DeclarationAssignment<Root>),
     Reference(ResolvedReference<Root>),
-    Literal(name_table::EncodedId<Root>),
+    Literal(legacy_name_table::EncodedId<Root>),
     Scalar(ScalarValue),
     /// Marker for a fixed ordered product whose member values are stored under
     /// their own typed roles in the enclosing mirror.
