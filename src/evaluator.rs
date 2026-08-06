@@ -720,7 +720,7 @@ where
     Root: Clone + Ord,
     Record: StructureRecord<Root>,
 {
-    /// Construct the table-owned evaluator used by `Textual`.
+    /// Construct the table-owned evaluator used by the three structural capabilities.
     pub fn new(
         table: &'table AddressedStructuralTable<Root, Record>,
     ) -> Result<Self, DecodeError<Root>> {
@@ -772,7 +772,7 @@ where
     ///
     /// Fixed literal and exclusion vocabulary still resolve through immutable
     /// encoded identity. The returned role-keyed tree retains exact source
-    /// spellings and bounds only at this TextualForm boundary.
+    /// spellings and bounds only at this source boundary.
     pub fn plan_text<Resolver: EncodedNameResolver<Root> + ?Sized>(
         &self,
         expected: &EncodedTypeId<Root>,

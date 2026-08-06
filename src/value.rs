@@ -73,7 +73,7 @@ impl<Root> SourceBoundedStructuralValue<Root> {
 }
 
 /// A generic mirror keyed by archived stable role ids, never by a fixed field
-/// index. Manual `Textual::reify`/`reflect` can name a compile-time role directly.
+/// index. A language-specific reifier can name a compile-time role directly.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq)]
 pub struct RoleKeyedMirror<Root> {
     values: BTreeMap<StableRoleId, FieldValue<Root>>,
@@ -102,7 +102,7 @@ impl<Root> RoleKeyedMirror<Root> {
 }
 
 /// Checked authoring state for a manual encoded-value mirror. Only a typed
-/// field-role can add a value, so external `Textual::reflect` code never
+/// field-role can add a value, so external reflection code never
 /// writes a raw stable id or an untyped map entry.
 #[derive(Clone, Debug)]
 pub struct StructuralValueRecord<Root> {

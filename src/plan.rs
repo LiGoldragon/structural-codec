@@ -1,4 +1,4 @@
-//! Allocation-free structural planning at the TextualForm boundary.
+//! Allocation-free structural planning at the source boundary.
 //!
 //! A plan is the selected typed parse tree before declaration and reference
 //! identities exist. Exact source spellings and bounds live only on this

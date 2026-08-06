@@ -1,4 +1,4 @@
-//! Textual conformance laws for the table-owned two-pass route.
+//! Structural capability laws for the table-owned two-pass route.
 
 use crate::StructuralEvaluator;
 use crate::fixture::{COMMIT_SEQUENCE, FixtureBuilder};
